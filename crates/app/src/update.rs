@@ -11,7 +11,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use mojuan_core::update::{self, Release};
 
 /// 默认更新源；留空表示"未配置"（首选项里可以手填 owner/repo）
-pub const DEFAULT_REPO: &str = "";
+pub const DEFAULT_REPO: &str = "118coder/mojuan";
 
 pub enum Msg {
     Checked(Result<Release, String>),
