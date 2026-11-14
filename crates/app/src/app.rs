@@ -753,13 +753,13 @@ impl App {
         // 更新检查：轮询后台结果
         let repo = self.updater.repo(&self.store.settings.update_repo);
         let auto = self.store.settings.check_updates;
-        let notes = self
-            .updater
-            .poll(now, mojuan_core::VERSION, self.updater.busy());
+        let notes = self.updater.poll(now, mojuan_core::VERSION);
         for n in notes {
             self.toast(n, now);
         }
         if !self.updater.auto_done {
+            // egui 是"有事件才画"的，定时唤醒一次让自动检查真的会发生
+            ctx.request_repaint_after(std::time::Duration::from_secs(2));
             self.updater.maybe_auto(auto, &repo, now);
         }
         if self.updater.busy() {

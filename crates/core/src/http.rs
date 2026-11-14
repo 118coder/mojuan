@@ -92,7 +92,9 @@ mod win {
     const WINHTTP_QUERY_STATUS_CODE: u32 = 19;
     const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
     const WINHTTP_OPTION_REDIRECT_POLICY: u32 = 88;
-    const REDIRECT_ALWAYS: u32 = 0;
+    // 0 = NEVER, 1 = 禁止 https→http, 2 = 总是跟随。
+    // GitHub 的 release 附件会 302 到 CDN，必须跟随。
+    const REDIRECT_ALWAYS: u32 = 2;
 
     struct Owned(Handle);
     impl Drop for Owned {

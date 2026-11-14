@@ -36,7 +36,11 @@ pub enum Status {
 pub struct Updater {
     pub status: Status,
     pub dialog_open: bool,
+    /// 右下角是否有"有新版本"的小浮窗
+    pub banner: bool,
     pub auto_done: bool,
+    /// 本次检查是否由启动自动触发（失败时不打扰用户）
+    pub auto_pending: bool,
     pub last_check: Option<f64>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -48,7 +52,9 @@ impl Default for Updater {
         Self {
             status: Status::Idle,
             dialog_open: false,
+            banner: false,
             auto_done: false,
+            auto_pending: false,
             last_check: None,
             tx,
             rx,
@@ -107,15 +113,22 @@ impl Updater {
         Ok(())
     }
 
-    pub fn poll(&mut self, now: f64, current: &str, auto: bool) -> Vec<String> {
+    pub fn poll(&mut self, now: f64, current: &str) -> Vec<String> {
+        let auto = self.auto_pending;
         let mut notes = Vec::new();
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Checked(Ok(release)) => {
+                    self.auto_pending = false;
                     let remote = release.version();
                     if update::is_newer(&remote, current) {
-                        self.dialog_open = true;
                         self.status = Status::Found(release);
+                        // 只在用户主动检查时才弹窗；自动检查只亮起右下角的小浮窗
+                        if !auto {
+                            self.dialog_open = true;
+                        } else {
+                            self.banner = true;
+                        }
                     } else {
                         self.status = Status::Latest(remote);
                         if !auto {
@@ -124,6 +137,7 @@ impl Updater {
                     }
                 }
                 Msg::Checked(Err(e)) => {
+                    self.auto_pending = false;
                     self.status = Status::Failed(e.clone());
                     if !auto {
                         notes.push(e);
@@ -144,7 +158,12 @@ impl Updater {
 
     /// 启动时自动检查（只做一次，延迟由调用方控制）
     pub fn maybe_auto(&mut self, enabled: bool, repo: &str, now: f64) {
-        if !enabled || self.auto_done || now < 2.0 {
+        // 启动后延迟一点，避免和首屏渲染抢资源；测试时可用 MJ_AUTO_WAIT 覆盖
+        let wait: f64 = std::env::var("MJ_AUTO_WAIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2.0);
+        if !enabled || self.auto_done || now < wait {
             return;
         }
         if repo.trim().is_empty() {
@@ -152,6 +171,7 @@ impl Updater {
             return;
         }
         self.auto_done = true;
+        self.auto_pending = true;
         self.check(repo.to_string(), now);
     }
 }
@@ -165,39 +185,35 @@ pub fn new_exe_path() -> PathBuf {
     dir.join("mojuan.update.exe")
 }
 
-/// 生成替换脚本并退出程序：等本进程退出 → 覆盖 → 启动新版本 → 自删
+/// 就地把当前 exe 换成新版本，然后启动新进程并退出。
+///
+/// 交换文件由 `mojuan_core::update::swap_in_place` 完成（失败会回滚），
+/// 这里只负责"拉起新版本 → 退出 → 下次启动清理旧文件"。
 pub fn install_and_restart(new_exe: &std::path::Path) -> Result<(), String> {
     let cur = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = cur.parent().ok_or("找不到程序目录")?.to_path_buf();
-    let bat = dir.join("mojuan-update.bat");
-    let script = format!(
-        "@echo off\r\n\
-         chcp 65001 >nul\r\n\
-         ping 127.0.0.1 -n 3 >nul\r\n\
-         move /y \"{new}\" \"{cur}\" >nul\r\n\
-         start \"\" \"{cur}\"\r\n\
-         del \"%~f0\"\r\n",
-        new = new_exe.display(),
-        cur = cur.display()
-    );
-    std::fs::write(&bat, script).map_err(|e| format!("写入更新脚本失败：{e}"))?;
+    update::swap_in_place(&cur, new_exe)?;
 
+    let mut cmd = std::process::Command::new(&cur);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const DETACHED: u32 = 0x0000_0008;
-        const NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", "/b"])
-            .arg(&bat)
-            .creation_flags(DETACHED | NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("启动更新脚本失败：{e}"))?;
+        cmd.creation_flags(DETACHED);
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        return Err("当前平台不支持自动替换".into());
-    }
+    cmd.spawn()
+        .map_err(|e| format!("新版本启动失败：{e}。请手动运行 {cur:?}"))?;
 
     std::process::exit(0);
+}
+
+/// 启动时清理上一次更新留下的旧 exe（失败也无所谓）
+pub fn cleanup_old_exe() {
+    if let Ok(cur) = std::env::current_exe() {
+        if let Some(dir) = cur.parent() {
+            let old = dir.join("mojuan.old.exe");
+            if old.exists() {
+                let _ = std::fs::remove_file(&old);
+            }
+        }
+    }
 }

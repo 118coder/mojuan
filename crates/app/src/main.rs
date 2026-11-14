@@ -16,6 +16,8 @@ mod win;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
+    // 更新替换后，清掉上次留下的旧版本
+    update::cleanup_old_exe();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1340.0, 880.0])

@@ -1,6 +1,6 @@
 //! 版本检查与下载：通过 GitHub Releases 判断是否有新版本。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -36,7 +36,11 @@ impl Release {
     }
 
     pub fn version(&self) -> String {
-        self.tag_name.trim_start_matches(['v', 'V']).to_string()
+        // tag 可能是 jq-1.8.2 / v1.2.3 / release-2024.05 之类，能解析就统一成 x.y.z
+        match Version::parse(&self.tag_name) {
+            Some(v) => v.to_string(),
+            None => self.tag_name.trim_start_matches(['v', 'V']).to_string(),
+        }
     }
 }
 
@@ -48,9 +52,19 @@ pub struct Version {
 }
 
 impl Version {
+    /// 从任意形式的 tag 里取出第一段 x.y.z。
+    ///
+    /// 兼容 `1.2.3`、`v1.2.3`、`jq-1.8.2`、`release-2024.05.1`、`1.2.3-beta.1`
     pub fn parse(s: &str) -> Option<Self> {
-        let core = s.trim().trim_start_matches(['v', 'V']);
-        let core = core.split(['-', '+']).next().unwrap_or(core);
+        let chars: Vec<char> = s.trim().chars().collect();
+        // 从第一个数字开始
+        let start = chars.iter().position(|c| c.is_ascii_digit())?;
+        let mut end = start;
+        while end < chars.len() && (chars[end].is_ascii_digit() || chars[end] == '.') {
+            end += 1;
+        }
+        let core: String = chars[start..end].iter().collect();
+        let core = core.trim_matches('.');
         let mut it = core.split('.');
         let major = it.next()?.parse().ok()?;
         let minor = it.next().unwrap_or("0").parse().ok()?;
@@ -108,4 +122,40 @@ pub fn download(url: &str, dest: &Path, max_bytes: usize) -> Result<u64, String>
     }
     std::fs::write(dest, &resp.body).map_err(|e| format!("写入文件失败：{e}"))?;
     Ok(resp.body.len() as u64)
+}
+
+/// 就地把 `current` 换成 `new_exe`，旧文件保留为 `current` 同目录的 `*.old`。
+///
+/// Windows 允许重命名正在运行的 exe，但不能覆盖它，所以顺序是
+/// 先把旧文件改名让位，再让新文件顶上；任何一步失败都回滚，
+/// 保证"程序还在"比"更新成功"更重要。
+///
+/// 返回旧文件的路径（调用方负责在新进程启动后删除）。
+pub fn swap_in_place(current: &Path, new_exe: &Path) -> Result<PathBuf, String> {
+    if !new_exe.exists() {
+        return Err("更新文件已不存在，请重新下载".into());
+    }
+    let dir = current.parent().ok_or("找不到程序目录")?;
+    let stem = current
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "mojuan".into());
+    let ext = current
+        .extension()
+        .map(|s| format!(".{}", s.to_string_lossy()))
+        .unwrap_or_default();
+    let old = dir.join(format!("{stem}.old{ext}"));
+
+    if old.exists() {
+        let _ = std::fs::remove_file(&old);
+    }
+
+    std::fs::rename(current, &old)
+        .map_err(|e| format!("无法重命名当前程序（可能放在只读目录）：{e}"))?;
+
+    if let Err(e) = std::fs::rename(new_exe, current) {
+        let _ = std::fs::rename(&old, current);
+        return Err(format!("替换失败：{e}"));
+    }
+    Ok(old)
 }

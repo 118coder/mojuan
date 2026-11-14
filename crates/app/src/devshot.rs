@@ -3,9 +3,10 @@
 //! 用法：设置环境变量 `MJ_SHOT=输出路径.ppm` 启动，程序会在第 N 帧后截图。
 //! PPM 是无依赖的简单格式，可以用 ffmpeg 转成 PNG 看。
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static FRAMES: AtomicU32 = AtomicU32::new(0);
+static TAKEN: AtomicBool = AtomicBool::new(false);
 
 pub fn tick(ctx: &egui::Context) {
     let Ok(path) = std::env::var("MJ_SHOT") else {
@@ -24,7 +25,18 @@ pub fn tick(ctx: &egui::Context) {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(14);
-    if n == wait {
+    // 也可以按秒等（网络请求这类跟帧数无关的等待更可靠）
+    let secs: Option<f64> = std::env::var("MJ_SHOT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let ready = match secs {
+        Some(s) => ctx.input(|i| i.time) >= s,
+        None => n == wait,
+    };
+    if n < wait + 8 || secs.is_some() {
+        ctx.request_repaint();
+    }
+    if ready && !TAKEN.swap(true, Ordering::Relaxed) {
         let ctx2 = ctx.clone();
         ctx.request_screenshot(move |image| {
             if let Err(e) = write_ppm(&path, &image) {
@@ -34,9 +46,6 @@ pub fn tick(ctx: &egui::Context) {
             }
             ctx2.send_viewport_cmd(egui::ViewportCommand::Close);
         });
-        ctx.request_repaint();
-    }
-    if n < wait + 8 {
         ctx.request_repaint();
     }
 }

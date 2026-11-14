@@ -75,6 +75,8 @@ impl App {
         }
         if self.updater.dialog_open {
             self.ui_update_dialog(ctx, now);
+        } else {
+            self.ui_update_banner(ctx, now);
         }
         if self.palette.open {
             self.ui_palette(ctx, now);
