@@ -1,0 +1,6 @@
+/target
+**/target
+/dist
+**/data
+*.ppm
+.DS_Store
