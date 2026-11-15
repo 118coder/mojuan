@@ -9,9 +9,55 @@ use mojuan_core::ViewMode;
 use crate::app::App;
 use crate::icons::{self, Icon};
 use crate::theme::alpha;
-use crate::ui::{preview, widgets};
+use crate::ui::{preview, vpreview, widgets};
 
 impl App {
+    /// 极简模式顶条：文件名 + 展开完整界面
+    pub(crate) fn ui_minimal_bar(&mut self, ui: &mut Ui, now: f64) {
+        let pal = self.pal.clone();
+        ui.horizontal_centered(|ui| {
+            ui.set_min_height(34.0);
+            ui.add_space(2.0);
+            let title = self
+                .tab()
+                .map(|t| t.title.clone())
+                .unwrap_or_else(|| "墨卷".into());
+            ui.label(RichText::new(title).size(13.0).color(pal.text_dim));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("完整界面").size(12.0).color(pal.text),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    self.minimal = false;
+                }
+                ui.label(
+                    RichText::new("Esc")
+                        .size(11.0)
+                        .color(pal.text_faint),
+                );
+            });
+        });
+        widgets::hairline(ui, &pal);
+        let _ = now;
+    }
+
+    /// 极简模式内容：md 直接渲染预览，txt 直接编辑
+    pub(crate) fn ui_minimal_content(&mut self, ui: &mut Ui, now: f64) {
+        if self.tabs.is_empty() {
+            self.ui_welcome(ui, now);
+            return;
+        }
+        match self.store.settings.mode {
+            ViewMode::Edit => self.ui_editor(ui, false, now),
+            _ => self.preview_area(ui, false, now),
+        }
+    }
+
     pub(crate) fn ui_main(&mut self, ui: &mut Ui, now: f64) {
         let pal = self.pal.clone();
         let w = ui.available_width();
@@ -224,8 +270,16 @@ impl App {
             );
             return;
         };
+
         let path = tab.path.clone();
+        let plain = tab.plain;
+        // 用 mem::take 拿到所有权，避免每帧克隆大字符串（千万字符时很关键）
+        let text = std::mem::take(&mut tab.text);
         let doc = std::mem::take(&mut tab.doc);
+        let mut vp = std::mem::take(&mut tab.vpreview);
+        let rev = tab.rev;
+        let path_id = path.to_string_lossy().to_string();
+        let base = path.parent().map(|p| p.to_path_buf());
         let restore = tab.restore_read.take();
 
         let opts = preview::Opts {
@@ -237,32 +291,73 @@ impl App {
         let mut pending = self.pending_scroll.take();
         let mut acts = Vec::new();
         let mut imgs = std::mem::take(&mut self.images);
-
-        let mut area = ScrollArea::vertical()
-            .id_salt(("read", &path))
-            .auto_shrink([false, false]);
         let dev = self.dev_scroll;
-        if let Some(r) = dev.or(restore) {
-            area = area.vertical_scroll_offset(r);
-        }
-        let out = area.show(ui, |ui| {
-            ui.add_space(if compact { 18.0 } else { 30.0 });
-            acts = preview::render(ui, &pal, &doc, &opts, &mut pending, &mut imgs);
-            ui.add_space(140.0);
-        });
+
+        let offset = if text.len() > vpreview::VIRTUAL_THRESHOLD {
+            // 千万字路径：只解析、只布局视口内的块
+            let (a, off) = vpreview::render(
+                &mut vp,
+                ui,
+                &pal,
+                &opts,
+                &text,
+                base.as_deref(),
+                rev,
+                &path_id,
+                &mut pending,
+                &mut imgs,
+                restore,
+                dev,
+                plain,
+            );
+            acts = a;
+            off
+        } else {
+            let outer = ui.available_rect_before_wrap();
+            let mut area = ScrollArea::vertical()
+                .id_salt(("read", &path))
+                .auto_shrink([false, false]);
+            if let Some(r) = dev.or(restore) {
+                area = area.vertical_scroll_offset(r);
+            }
+            let out = area.show(ui, |ui| {
+                ui.add_space(if compact { 18.0 } else { 30.0 });
+                acts = preview::render(ui, &pal, &doc, &opts, &mut pending, &mut imgs);
+                ui.add_space(140.0);
+            });
+            let off = out.state.clamped_offset().y;
+            let total = out.content_size.y.max(outer.height());
+            if total > outer.height() + 4.0 {
+                let thumb = (outer.height() * outer.height() / total).max(26.0);
+                let span = (outer.height() - thumb).max(1.0);
+                let frac = (off / (total - outer.height()).max(1.0)).clamp(0.0, 1.0);
+                ui.painter().rect_filled(
+                    Rect::from_min_size(
+                        Pos2::new(outer.max.x - 3.0, outer.min.y + span * frac),
+                        Vec2::new(2.0, thumb),
+                    ),
+                    1,
+                    alpha(pal.accent, 110),
+                );
+            }
+            off
+        };
 
         self.images = imgs;
         if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.text = text;
             tab.doc = doc;
-            tab.scroll_read = out.state.clamped_offset().y;
+            tab.vpreview = vp;
+            tab.scroll_read = offset;
         }
         self.pending_scroll = pending;
 
         for a in acts {
             match a {
                 preview::Action::Link(url) => self.handle_link(url, now),
-                preview::Action::Copy(text) => {
-                    ui.ctx().copy_text(text);
+                preview::Action::Copy(copied) => {
+                    ui.ctx().copy_text(copied);
+                    self.toast("已复制到剪贴板", now);
                 }
             }
         }

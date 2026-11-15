@@ -1,3 +1,5 @@
+pub mod big_editor;
+pub mod blocks_extra;
 pub mod dialogs;
 pub mod editor;
 pub mod main_view;
@@ -8,4 +10,5 @@ pub mod sidebar;
 pub mod statusbar;
 pub mod topbar;
 pub mod update_ui;
+pub mod vpreview;
 pub mod widgets;

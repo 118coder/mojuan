@@ -35,6 +35,23 @@ impl App {
                         .color(pal.text_dim),
                 );
 
+                // 大文档模式标识：让用户知道当前走的是虚拟滚动
+                let big = tab.text.len() > crate::ui::vpreview::VIRTUAL_THRESHOLD;
+                let blocks = tab
+                    .vpreview
+                    .index
+                    .as_ref()
+                    .map(|i| i.blocks.len())
+                    .unwrap_or(0);
+                if big {
+                    dot(ui);
+                    ui.label(
+                        RichText::new(format!("虚拟滚动 · {} 块", group(blocks)))
+                            .size(10.5)
+                            .color(pal.accent),
+                    );
+                }
+
                 let dirty = tab.dirty;
                 let line = tab.cursor_line;
                 let col = tab.cursor_col;

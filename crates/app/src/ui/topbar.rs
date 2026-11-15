@@ -139,6 +139,19 @@ impl App {
                         action = Some("settings");
                     }
                     widgets::hairline(ui, &pal);
+                    if widgets::menu_item(ui, &pal, Icon::FileText, "导出为 HTML", false).clicked() {
+                        action = Some("export-html");
+                    }
+                    if widgets::menu_item(ui, &pal, Icon::FileText, "导出为 Word", false).clicked() {
+                        action = Some("export-docx");
+                    }
+                    if widgets::menu_item(ui, &pal, Icon::FileText, "导出为 PDF", false).clicked() {
+                        action = Some("export-pdf");
+                    }
+                    if widgets::menu_item(ui, &pal, Icon::Image, "导出为长图 PNG", false).clicked() {
+                        action = Some("export-png");
+                    }
+                    widgets::hairline(ui, &pal);
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new("墨卷")
@@ -181,6 +194,10 @@ impl App {
                 }
                 "sample" => self.open_sample(now),
                 "settings" => self.dialog = Some(crate::app::Dialog::Settings),
+                "export-html" => self.export_html(now),
+                "export-docx" => self.export_docx(now),
+                "export-pdf" => self.export_pdf(now),
+                "export-png" => self.export_png(now),
                 _ => {}
             }
         }

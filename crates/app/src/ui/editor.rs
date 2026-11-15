@@ -8,6 +8,18 @@ use crate::ui::{md_highlight, widgets};
 
 impl App {
     pub(crate) fn ui_editor(&mut self, ui: &mut Ui, split: bool, now: f64) {
+        // 大文档走滑动窗口编辑器，避免千万字符全量排版
+        if self
+            .tabs
+            .get(self.active)
+            .map(|t| t.text.len() > crate::ui::vpreview::VIRTUAL_THRESHOLD)
+            .unwrap_or(false)
+        {
+            ui.painter()
+                .rect_filled(ui.available_rect_before_wrap(), 0, self.pal.edit_bg);
+            crate::ui::big_editor::render(self, ui, split, now);
+            return;
+        }
         let pal = self.pal.clone();
         let fs = self.store.settings.font_size;
         let id = self.editor_id();
@@ -30,6 +42,7 @@ impl App {
 
         let tab = &mut self.tabs[self.active];
         let restore = tab.restore_edit.take();
+        let plain = tab.plain;
         let mut area = ScrollArea::vertical()
             .id_salt(("edit-scroll", &tab.path))
             .auto_shrink([false, false]);
@@ -46,7 +59,22 @@ impl App {
                 ui.vertical(|ui| {
                     ui.set_width(col_w);
                     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-                        let job = md_highlight::job(buf.as_str(), &pal, fs, wrap);
+                        // txt 保持纯文本：不做 Markdown 着色
+                        let job = if plain {
+                            let mut j = egui::text::LayoutJob::default();
+                            j.append(
+                                buf.as_str(),
+                                0.0,
+                                egui::TextFormat::simple(
+                                    egui::FontId::monospace(fs),
+                                    pal.text,
+                                ),
+                            );
+                            j.wrap.max_width = wrap;
+                            j
+                        } else {
+                            md_highlight::job(buf.as_str(), &pal, fs, wrap)
+                        };
                         ui.ctx().fonts_mut(|f| f.layout_job(job))
                     };
                     let resp = ui.add(
@@ -67,6 +95,8 @@ impl App {
         tab.scroll_edit = out.state.clamped_offset().y;
 
         if changed {
+            tab.rev = tab.rev.wrapping_add(1);
+            tab.win_valid = false;
             tab.dirty = true;
             tab.needs_parse = true;
             tab.last_edit = now;

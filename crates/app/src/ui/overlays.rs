@@ -22,6 +22,9 @@ enum Cmd {
     Theme,
     Mode,
     ExportHtml,
+    ExportWord,
+    ExportPdf,
+    ExportPng,
     Settings,
     ClearRecent,
 }
@@ -41,6 +44,9 @@ fn commands() -> Vec<CmdItem> {
         CmdItem { label: "切换主题", hint: "", cmd: Cmd::Theme },
         CmdItem { label: "切换视图（阅读/分屏/编辑）", hint: "Ctrl+E", cmd: Cmd::Mode },
         CmdItem { label: "导出为 HTML", hint: "", cmd: Cmd::ExportHtml },
+        CmdItem { label: "导出为 Word（docx）", hint: "", cmd: Cmd::ExportWord },
+        CmdItem { label: "导出为 PDF", hint: "", cmd: Cmd::ExportPdf },
+        CmdItem { label: "导出为长图 PNG", hint: "", cmd: Cmd::ExportPng },
         CmdItem { label: "首选项", hint: "Ctrl+,", cmd: Cmd::Settings },
         CmdItem { label: "清空最近记录", hint: "", cmd: Cmd::ClearRecent },
     ]
@@ -348,6 +354,9 @@ impl App {
                 self.set_mode(next);
             }
             Cmd::ExportHtml => self.export_html(now),
+            Cmd::ExportWord => self.export_docx(now),
+            Cmd::ExportPdf => self.export_pdf(now),
+            Cmd::ExportPng => self.export_png(now),
             Cmd::Settings => self.dialog = Some(Dialog::Settings),
             Cmd::ClearRecent => {
                 self.store.recent.clear();

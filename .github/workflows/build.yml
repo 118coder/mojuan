@@ -4,7 +4,6 @@ on:
   push:
     branches: [main, master]
     tags: ["v*"]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -15,7 +14,7 @@ env:
 
 jobs:
   windows:
-    name: Windows x64
+    name: Windows x64 (single-file exe)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,38 +52,12 @@ jobs:
       # 打 tag 时自动建 Release 并挂上单文件 exe（程序内的更新检查读的就是这个接口）
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/mojuan.exe \
-            --title "墨卷 ${GITHUB_REF_NAME}" \
-            --notes "单文件免安装版：下载 mojuan.exe 直接运行，不需要任何运行时。详见 README。" \
-            --repo "${GITHUB_REPOSITORY}"
-
-  linux:
-    name: Linux x64
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build (release)
-        run: cargo build --release --locked
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mojuan-linux-x64
-          path: target/release/mojuan
-          if-no-files-found: error
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag dist/mojuan.exe `
+            --title "墨卷 $tag" `
+            --notes "单文件免安装版：下载 mojuan.exe 直接运行，不需要任何运行时。详见 README。" `
+            --repo "${{ github.repository }}"

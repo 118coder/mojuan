@@ -10,9 +10,13 @@ pub mod doc;
 pub mod files;
 pub mod http;
 pub mod highlight;
+pub mod large;
+pub mod math;
+pub mod mermaid;
 pub mod search;
 pub mod store;
 pub mod update;
+pub mod vindex;
 
 pub use doc::{Align, Block, Doc, ListItem, Run, Stats, TocEntry};
 pub use highlight::TokenStyle;

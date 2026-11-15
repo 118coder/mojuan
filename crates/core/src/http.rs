@@ -111,26 +111,30 @@ mod win {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    fn split_url(url: &str) -> Result<(String, String, u16), String> {
-        let rest = url
-            .strip_prefix("https://")
-            .ok_or_else(|| "只支持 https 地址".to_string())?;
+    fn split_url(url: &str) -> Result<(String, String, u16, bool), String> {
+        let (rest, secure) = if let Some(r) = url.strip_prefix("https://") {
+            (r, true)
+        } else if let Some(r) = url.strip_prefix("http://") {
+            (r, false)
+        } else {
+            return Err("只支持 http/https 地址".to_string());
+        };
         let (host_port, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, "/"),
         };
         let (host, port) = match host_port.rsplit_once(':') {
-            Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(443)),
-            None => (host_port.to_string(), 443),
+            Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(if secure { 443 } else { 80 })),
+            None => (host_port.to_string(), if secure { 443 } else { 80 }),
         };
         if host.is_empty() {
             return Err("地址缺少主机名".into());
         }
-        Ok((host, path.to_string(), port))
+        Ok((host, path.to_string(), port, secure))
     }
 
     pub fn get(url: &str, max_bytes: usize, timeout_ms: u32) -> Result<Response, String> {
-        let (host, path, port) = split_url(url)?;
+        let (host, path, port, secure) = split_url(url)?;
 
         let agent = wide("Mojuan/1.0 (Windows)");
         let session = Owned(unsafe {
@@ -167,7 +171,7 @@ mod win {
                 null(),
                 null(),
                 null(),
-                WINHTTP_FLAG_SECURE,
+                if secure { WINHTTP_FLAG_SECURE } else { 0 },
             )
         });
         if request.0.is_null() {
