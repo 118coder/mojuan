@@ -4,9 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# 代码高亮正则引擎：默认 onig（egui 版，MinGW 下编译正常、体积更小）。
+# Tauri 版（MSVC）关掉：onig 是 C 库，MSVC+中文路径下 cl.exe 编译失败，
+# 且 web 前端用 Shiki 高亮，Rust 侧引擎本就闲置 → default-features = false 走 fancy-regex。
+default = ["onig"]
+onig = ["syntect/regex-onig"]
+
 [dependencies]
 comrak = { version = "0.59", default-features = false }
-syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-onig"] }
+syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 trash = "5.3"
