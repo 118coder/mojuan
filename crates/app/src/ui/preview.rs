@@ -18,6 +18,10 @@ use crate::theme::{alpha, Palette, R_MD, R_SM};
 pub enum Action {
     Link(String),
     Copy(String),
+    /// 点击图片：全屏放大查看
+    ViewImage(String),
+    /// 进度条点击/拖拽：滚动到指定偏移
+    ScrollTo(f32),
 }
 
 pub struct Opts {
@@ -201,12 +205,15 @@ fn block(
             }
         }
         Block::Quote(inner) => {
-            let frame = Frame::new().inner_margin(Margin {
-                left: 16,
-                right: 0,
-                top: 2,
-                bottom: 2,
-            });
+            let frame = Frame::new()
+                .fill(alpha(pal.text, if pal.dark { 6 } else { 4 }))
+                .corner_radius(CornerRadius::same(R_SM))
+                .inner_margin(Margin {
+                    left: 16,
+                    right: 0,
+                    top: 4,
+                    bottom: 4,
+                });
             let resp = frame.show(ui, |ui| {
                 ui.set_width(ui.available_width() - 16.0);
                 blocks(ui, cx, inner, pending, depth + 1, true);
@@ -316,11 +323,21 @@ fn image_block(
                 .min(1.0)
                 .max(0.05);
             let draw = Vec2::new(natural.x * scale, natural.y * scale);
+            let key = path
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| src.to_string());
             ui.vertical_centered(|ui| {
                 let img = egui::Image::new(egui::load::SizedTexture::new(id, natural))
                     .fit_to_exact_size(draw)
-                    .corner_radius(CornerRadius::same(R_MD));
+                    .corner_radius(CornerRadius::same(R_MD))
+                    .sense(Sense::click());
                 let resp = ui.add(img);
+                if resp.clicked() {
+                    cx.acts.push(Action::ViewImage(key.clone()));
+                }
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
                 ui.painter().rect_stroke(
                     resp.rect,
                     CornerRadius::same(R_MD),

@@ -24,9 +24,6 @@ impl App {
         let fs = self.store.settings.font_size;
         let id = self.editor_id();
 
-        ui.painter()
-            .rect_filled(ui.available_rect_before_wrap(), 0, pal.edit_bg);
-
         if self.tabs.get(self.active).is_none() {
             widgets::empty_state(ui, &pal, Icon::FileText, "还没有打开文档", "左侧选择文件，或按 Ctrl+N 新建");
             return;

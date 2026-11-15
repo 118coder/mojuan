@@ -35,6 +35,19 @@ impl App {
                 {
                     self.minimal = false;
                 }
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("回顶").size(12.0).color(pal.text_dim),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    if let Some(t) = self.tab_mut() {
+                        t.restore_read = Some(0.0);
+                    }
+                }
                 ui.label(
                     RichText::new("Esc")
                         .size(11.0)
@@ -125,8 +138,6 @@ impl App {
 
     fn ui_welcome(&mut self, ui: &mut Ui, now: f64) {
         let pal = self.pal.clone();
-        ui.painter()
-            .rect_filled(ui.available_rect_before_wrap(), 0, pal.read_bg);
         let w = ui.available_width();
         ui.add_space((ui.available_height() * 0.14).max(40.0));
         ui.vertical_centered(|ui| {
@@ -256,8 +267,6 @@ impl App {
 
     fn preview_area(&mut self, ui: &mut Ui, compact: bool, now: f64) {
         let pal = self.pal.clone();
-        ui.painter()
-            .rect_filled(ui.available_rect_before_wrap(), 0, pal.read_bg);
 
         let idx = self.active;
         let Some(tab) = self.tabs.get_mut(idx) else {
@@ -289,13 +298,15 @@ impl App {
             compact,
         };
         let mut pending = self.pending_scroll.take();
+        let mut pending_scroll_to: Option<f32> = None;
         let mut acts = Vec::new();
         let mut imgs = std::mem::take(&mut self.images);
         let dev = self.dev_scroll;
 
+        let mut new_total = 0.0f32;
         let offset = if text.len() > vpreview::VIRTUAL_THRESHOLD {
             // 千万字路径：只解析、只布局视口内的块
-            let (a, off) = vpreview::render(
+            let (a, off, total) = vpreview::render(
                 &mut vp,
                 ui,
                 &pal,
@@ -311,6 +322,7 @@ impl App {
                 plain,
             );
             acts = a;
+            new_total = total;
             off
         } else {
             let outer = ui.available_rect_before_wrap();
@@ -327,6 +339,18 @@ impl App {
             });
             let off = out.state.clamped_offset().y;
             let total = out.content_size.y.max(outer.height());
+            new_total = total;
+            let bar_area = Rect::from_min_size(
+                Pos2::new(outer.max.x - 6.0, outer.min.y),
+                Vec2::new(6.0, outer.height()),
+            );
+            let bar_resp = ui.allocate_rect(bar_area, Sense::click() | Sense::drag());
+            if let Some(pos) = bar_resp.interact_pointer_pos() {
+                let f = ((pos.y - bar_area.min.y) / bar_area.height()).clamp(0.0, 1.0);
+                if bar_resp.dragged() || bar_resp.clicked() {
+                    pending_scroll_to = Some(f * (total - outer.height()));
+                }
+            }
             if total > outer.height() + 4.0 {
                 let thumb = (outer.height() * outer.height() / total).max(26.0);
                 let span = (outer.height() - thumb).max(1.0);
@@ -349,6 +373,11 @@ impl App {
             tab.doc = doc;
             tab.vpreview = vp;
             tab.scroll_read = offset;
+            tab.read_total = new_total;
+            tab.read_view = ui.available_height().max(1.0);
+            if let Some(y) = pending_scroll_to {
+                tab.restore_read = Some(y);
+            }
         }
         self.pending_scroll = pending;
 
@@ -359,6 +388,8 @@ impl App {
                     ui.ctx().copy_text(copied);
                     self.toast("已复制到剪贴板", now);
                 }
+                preview::Action::ViewImage(key) => self.viewer = Some(key),
+                preview::Action::ScrollTo(y) => pending_scroll_to = Some(y),
             }
         }
     }
@@ -512,11 +543,32 @@ impl App {
                         }
                         if close_resp.clicked() {
                             close = Some(i);
+                        } else if resp.clicked_by(egui::PointerButton::Middle) {
+                            close = Some(i);
+                        } else if resp.secondary_clicked() {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                self.tab_menu = Some((i, pos));
+                            }
                         } else if resp.clicked() {
                             activate = Some(i);
                         }
                         if resp.hovered() {
                             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                        }
+                    }
+                    // 标签栏空白区双击 = 新建文件
+                    let blank_w = ui.available_width().max(24.0);
+                    let (_, blank) = ui.allocate_exact_size(Vec2::new(blank_w, 28.0), Sense::click());
+                    if blank.double_clicked() {
+                        let dir = self
+                            .tab()
+                            .and_then(|t| t.path.parent().map(|p| p.to_path_buf()))
+                            .or_else(|| self.ws.as_ref().map(|w| w.root.clone()));
+                        if let Some(dir) = dir {
+                            self.dialog = Some(crate::app::Dialog::NewFile {
+                                dir,
+                                name: "未命名.md".into(),
+                            });
                         }
                     }
                 });

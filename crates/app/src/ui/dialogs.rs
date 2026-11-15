@@ -137,6 +137,68 @@ impl App {
                     keep = Some(Dialog::Delete { path, is_dir });
                 }
             }
+            Dialog::Replace { mut find, mut replace } => {
+                let pal = self.pal.clone();
+                let mut do_replace = false;
+                let mut close = false;
+                egui::Window::new("查找替换")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+                    .frame(widgets::menu_frame(&pal))
+                    .show(ctx, |ui| {
+                        ui.set_min_width(360.0);
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("查找").size(13.0).color(pal.text_dim))
+                                    .on_hover_text("支持精确匹配，区分大小写");
+                                ui.add(
+                                    TextEdit::singleline(&mut find)
+                                        .desired_width(240.0)
+                                        .margin(Margin::symmetric(8, 5)),
+                                );
+                            });
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("替换").size(13.0).color(pal.text_dim));
+                                ui.add(
+                                    TextEdit::singleline(&mut replace)
+                                        .desired_width(240.0)
+                                        .margin(Margin::symmetric(8, 5)),
+                                );
+                            });
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                if widgets::text_button(ui, &pal, "全部替换", find.is_empty()).clicked() {
+                                    do_replace = true;
+                                }
+                                if widgets::text_button(ui, &pal, "取消", false).clicked() {
+                                    close = true;
+                                }
+                            });
+                        });
+                    });
+                if do_replace && !find.is_empty() {
+                    if let Some(t) = self.tab_mut() {
+                        let count = t.text.matches(&find).count();
+                        if count > 0 {
+                            t.text = t.text.replace(&find, &replace);
+                            t.rev = t.rev.wrapping_add(1);
+                            t.win_valid = false;
+                            t.dirty = true;
+                            t.needs_parse = true;
+                            t.last_edit = now;
+                        }
+                        self.toast(format!("已替换 {} 处", count), now);
+                    }
+                    close = true;
+                }
+                if close {
+                    keep = None;
+                } else {
+                    keep = Some(Dialog::Replace { find, replace });
+                }
+            }
             Dialog::Settings => {
                 let mut cancel = false;
                 let mut submit = false;
@@ -146,6 +208,7 @@ impl App {
                 let mut autosave = self.store.settings.autosave;
                 let mut check_updates = self.store.settings.check_updates;
                 let mut minimal_open = self.store.settings.minimal_open;
+                let mut theme_auto = self.store.settings.theme_auto;
                 let mut repo = self.store.settings.update_repo.clone();
                 let mut do_check = false;
                 let mut theme_idx = match self.store.settings.theme {
@@ -184,6 +247,7 @@ impl App {
                     ui.add_space(12.0);
                     ui.checkbox(&mut autosave, "编辑时自动保存");
                     ui.checkbox(&mut minimal_open, "打开文件时进入极简模式（打开即见内容）");
+                    ui.checkbox(&mut theme_auto, "主题跟随系统明暗（Win11 深色模式）");
 
                     ui.add_space(14.0);
                     widgets::hairline(ui, &pal);
@@ -218,6 +282,7 @@ impl App {
                 self.store.settings.autosave = autosave;
                 self.store.settings.check_updates = check_updates;
                 self.store.settings.minimal_open = minimal_open;
+                self.store.settings.theme_auto = theme_auto;
                 self.store.settings.update_repo = repo.clone();
                 let _ = self.store.save();
                 if do_check {

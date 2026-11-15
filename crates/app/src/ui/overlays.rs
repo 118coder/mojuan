@@ -27,6 +27,10 @@ enum Cmd {
     ExportPng,
     Settings,
     ClearRecent,
+    ToggleSidebar,
+    Replace,
+    RevealInExplorer,
+    Fullscreen,
 }
 
 struct CmdItem {
@@ -49,6 +53,10 @@ fn commands() -> Vec<CmdItem> {
         CmdItem { label: "导出为长图 PNG", hint: "", cmd: Cmd::ExportPng },
         CmdItem { label: "首选项", hint: "Ctrl+,", cmd: Cmd::Settings },
         CmdItem { label: "清空最近记录", hint: "", cmd: Cmd::ClearRecent },
+        CmdItem { label: "查找替换（当前文档）", hint: "Ctrl+H", cmd: Cmd::Replace },
+        CmdItem { label: "显示 / 隐藏侧栏", hint: "Ctrl+", cmd: Cmd::ToggleSidebar },
+        CmdItem { label: "在资源管理器中显示", hint: "", cmd: Cmd::RevealInExplorer },
+        CmdItem { label: "全屏切换", hint: "F11", cmd: Cmd::Fullscreen },
     ]
 }
 
@@ -60,6 +68,62 @@ enum Pick {
 
 impl App {
     pub(crate) fn ui_overlays(&mut self, ctx: &egui::Context, now: f64) {
+        // 图片全屏查看器
+        if let Some(key) = self.viewer.clone() {
+            let pal = self.pal.clone();
+            let close = ctx.input(|i| i.pointer.any_click() || i.key_pressed(egui::Key::Escape));
+            egui::Area::new(egui::Id::unique("image-viewer"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(ctx.input(|i| i.viewport().outer_rect.unwrap_or(egui::Rect::NOTHING).min))
+                .show(ctx, |ui| {
+                    let screen = ui.max_rect();
+                    ui.painter()
+                        .rect_filled(screen, 0, Color32::from_black_alpha(216));
+                    let tex = if key.starts_with("http://") || key.starts_with("https://") {
+                        self.images.get_url(ctx, &key)
+                    } else {
+                        let p = std::path::PathBuf::from(&key);
+                        self.images.get(ctx, &p)
+                    };
+                    if let Some(h) = tex {
+                        let natural = h.size_vec2();
+                        let scale = (screen.width() * 0.9 / natural.x)
+                            .min(screen.height() * 0.9 / natural.y)
+                            .min(4.0);
+                        let draw = natural * scale;
+                        let (rect, _) = ui.allocate_exact_size(draw, egui::Sense::hover());
+                        let top_left = screen.center() - draw / 2.0;
+                        ui.painter().image(
+                            h.id(),
+                            egui::Rect::from_min_size(top_left, draw),
+                            egui::Rect::from_min_size(egui::Pos2::ZERO, natural),
+                            pal.text,
+                        );
+                        let _ = rect;
+                    } else {
+                        ui.label(
+                            RichText::new("图片加载中…")
+                                .size(15.0)
+                                .color(pal.text_dim),
+                        );
+                    }
+                    // 关闭提示
+                    let hint = ui.painter().layout_no_wrap(
+                        "点击任意处或 Esc 关闭".to_string(),
+                        egui::FontId::new(12.0, egui::FontFamily::Proportional),
+                        pal.text_dim,
+                    );
+                    ui.painter().galley(
+                        Pos2::new(screen.center().x - hint.size().x / 2.0, screen.max.y - 36.0),
+                        hint,
+                        pal.text_dim,
+                    );
+                });
+            if close {
+                self.viewer = None;
+            }
+        }
+
         let pal = self.pal.clone();
 
         if let Some(t) = self.toast.clone() {
@@ -357,12 +421,87 @@ impl App {
             Cmd::ExportWord => self.export_docx(now),
             Cmd::ExportPdf => self.export_pdf(now),
             Cmd::ExportPng => self.export_png(now),
+            Cmd::ToggleSidebar => {
+                let open = self.store.settings.sidebar_open;
+                self.store.settings.sidebar_open = !open;
+            }
+            Cmd::Replace => {
+                self.dialog = Some(Dialog::Replace {
+                    find: String::new(),
+                    replace: String::new(),
+                });
+            }
+            Cmd::RevealInExplorer => {
+                if let Some(p) = self.active_path() {
+                    let _ = std::process::Command::new("explorer")
+                        .arg("/select,")
+                        .arg(&p)
+                        .spawn();
+                } else {
+                    self.toast("没有打开的文件", now);
+                }
+            }
+            Cmd::Fullscreen => {
+                self.fullscreen = !self.fullscreen;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+            }
             Cmd::Settings => self.dialog = Some(Dialog::Settings),
             Cmd::ClearRecent => {
                 self.store.recent.clear();
                 let _ = self.store.save();
                 self.toast("已清空最近记录", now);
             }
+        }
+    }
+
+    /// 标签右键菜单：关闭 / 关闭其他 / 关闭右侧
+    pub(crate) fn ui_tab_menu(&mut self, ctx: &egui::Context, now: f64) {
+        let Some((idx, pos)) = self.tab_menu else { return };
+        let pal = self.pal.clone();
+        let mut action: Option<u8> = None;
+        egui::Area::new(egui::Id::new("tab-menu"))
+            .fixed_pos(pos)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                widgets::menu_frame(&pal).show(ui, |ui| {
+                    ui.set_width(170.0);
+                    if widgets::menu_item(ui, &pal, Icon::Close, "关闭  Ctrl+W", false).clicked() {
+                        action = Some(1);
+                    }
+                    if widgets::menu_item(ui, &pal, Icon::Close, "关闭其他", false).clicked() {
+                        action = Some(2);
+                    }
+                    if widgets::menu_item(ui, &pal, Icon::Close, "关闭右侧", false).clicked() {
+                        action = Some(3);
+                    }
+                });
+            });
+        if ctx.input(|i| i.pointer.any_click()) && !ctx.is_pointer_over_egui() {
+            self.tab_menu = None;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.tab_menu = None;
+        }
+        match action {
+            Some(1) => {
+                self.tab_menu = None;
+                self.close_tab(idx, now);
+            }
+            Some(2) => {
+                self.tab_menu = None;
+                for i in (0..self.tabs.len()).rev() {
+                    if i != idx {
+                        self.close_tab(i, now);
+                    }
+                }
+            }
+            Some(3) => {
+                self.tab_menu = None;
+                for i in ((idx + 1)..self.tabs.len()).rev() {
+                    self.close_tab(i, now);
+                }
+            }
+            _ => {}
         }
     }
 

@@ -52,6 +52,18 @@ impl App {
                     );
                 }
 
+                // 阅读进度百分比
+                if tab.read_total > tab.read_view + 50.0 && tab.read_view > 1.0 {
+                    let frac =
+                        (tab.scroll_read / (tab.read_total - tab.read_view)).clamp(0.0, 1.0);
+                    dot(ui);
+                    ui.label(
+                        RichText::new(format!("已读 {:.0}%", frac * 100.0))
+                            .size(10.5)
+                            .color(pal.text_dim),
+                    );
+                }
+
                 let dirty = tab.dirty;
                 let line = tab.cursor_line;
                 let col = tab.cursor_col;

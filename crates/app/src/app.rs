@@ -48,6 +48,11 @@ pub struct Tab {
     pub mtime: Option<SystemTime>,
     /// 文本修订号：每次编辑 +1，虚拟预览据此判断是否需要重建索引
     pub rev: u64,
+    /// 文件已被外部修改（dirty 时不自动重载，仅提示一次）
+    pub ext_stale: bool,
+    /// 阅读区内容总高 / 视口高（状态栏百分比用）
+    pub read_total: f32,
+    pub read_view: f32,
     /// 大文档虚拟预览状态（每个标签独立）
     pub vpreview: crate::ui::vpreview::State,
     /// 行起始字节表（大文档编辑窗口用；懒构建）
@@ -83,6 +88,9 @@ impl Tab {
             cursor_col: 1,
             mtime: None,
             rev: 1,
+            ext_stale: false,
+            read_total: 0.0,
+            read_view: 0.0,
             vpreview: crate::ui::vpreview::State::default(),
             line_starts: Vec::new(),
             line_starts_rev: 0,
@@ -143,6 +151,7 @@ pub struct Row {
 
 pub enum Dialog {
     NewFile { dir: PathBuf, name: String },
+    Replace { find: String, replace: String },
     NewFolder { dir: PathBuf, name: String },
     Rename { path: PathBuf, name: String },
     Delete { path: PathBuf, is_dir: bool },
@@ -202,12 +211,28 @@ pub struct App {
     pub more_menu: bool,
     /// 极简模式：无侧栏/状态栏/标签条，打开即见内容（类似记事本）
     pub minimal: bool,
+    /// 标签右键菜单（下标 + 弹出位置）
+    pub tab_menu: Option<(usize, Pos2)>,
+    /// 全屏状态（F11）
+    pub fullscreen: bool,
+    /// 图片放大查看（阅读区点击图片）
+    pub viewer: Option<String>,
+    /// 最近一帧的窗口位置与内容尺寸（退出时持久化）
+    pub win_rect: Option<[f32; 4]>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         crate::fonts::install(&cc.egui_ctx);
-        let store = Store::load();
+        let mut store = Store::load();
+        // 主题跟随系统明暗（Win11 深色模式）
+        if store.settings.theme_auto {
+            store.settings.theme = if system_prefers_dark() {
+                Theme::Dark
+            } else {
+                Theme::Light
+            };
+        }
         let pal = Palette::new(store.settings.theme);
         pal.apply(&cc.egui_ctx);
         cc.egui_ctx.set_theme(match store.settings.theme {
@@ -250,8 +275,19 @@ impl App {
             updater: crate::update::Updater::default(),
             more_menu: false,
             minimal: false,
+            tab_menu: None,
+            fullscreen: false,
+            viewer: None,
+            win_rect: None,
         };
 
+        // 恢复上次窗口位置与尺寸（多显示器离屏兜底）
+        if let Some([x, y, w, h]) = app.store.settings.window {
+            if x > -2000.0 && y > -2000.0 && x < 20000.0 && y < 20000.0 && w > 220.0 && h > 200.0 {
+                cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(x, y)));
+                cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(w, h)));
+            }
+        }
         // 恢复上次的工作区 / 文件
         if let Some(ws) = app.store.settings.last_workspace.clone() {
             let p = PathBuf::from(&ws);
@@ -318,6 +354,8 @@ impl App {
 
     pub fn set_theme(&mut self, ctx: &Context, theme: Theme) {
         self.store.settings.theme = theme;
+        // 手动切换 = 用户明确表态，退出「跟随系统」模式
+        self.store.settings.theme_auto = false;
         self.pal = Palette::new(theme);
         self.pal.apply(ctx);
         ctx.set_theme(match theme {
@@ -334,6 +372,7 @@ impl App {
 
     pub fn persist(&mut self) {
         self.store.settings.last_file = self.active_path().map(|p| p.to_string_lossy().to_string());
+        self.store.settings.window = self.win_rect;
         let _ = self.store.save();
     }
 
@@ -372,8 +411,9 @@ impl App {
             .set_title("打开 Markdown 文件")
             .pick_file()
         {
-            self.open_path(path);
-            self.toast("已打开文件", now);
+            self.open_path(path.clone());
+            let name = files::display_name(&path);
+            self.toast(format!("已打开「{name}」"), now);
         }
     }
 
@@ -425,6 +465,7 @@ impl App {
         match files::write_doc(&tab.path, &tab.text, tab.crlf) {
             Ok(()) => {
                 tab.dirty = false;
+                tab.ext_stale = false;
                 tab.mtime = files::mtime(&tab.path);
                 self.last_save_flash = now;
                 self.toast("已保存", now);
@@ -435,6 +476,19 @@ impl App {
                 false
             }
         }
+    }
+
+    pub fn switch_tab(&mut self, idx: usize) {
+        let n = self.tabs.len();
+        if n == 0 {
+            return;
+        }
+        let i = idx.min(n - 1);
+        if let Some(tab) = self.tabs.get_mut(i) {
+            tab.restore_edit = Some(tab.scroll_edit);
+            tab.restore_read = Some(tab.scroll_read);
+        }
+        self.active = i;
     }
 
     pub fn close_tab(&mut self, idx: usize, now: f64) {
@@ -652,9 +706,55 @@ impl App {
                     self.set_mode(next);
                 }
                 (true, false, false, Key::W) => self.close_tab(self.active, now),
+                (true, false, false, Key::Tab) => {
+                    let n = self.tabs.len();
+                    if n > 0 {
+                        self.switch_tab((self.active + 1) % n);
+                    }
+                }
+                (true, true, false, Key::Tab) => {
+                    let n = self.tabs.len();
+                    if n > 0 {
+                        self.switch_tab((self.active + n - 1) % n);
+                    }
+                }
+                (false, false, false, Key::F11) => {
+                    self.fullscreen = !self.fullscreen;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+                }
+                (true, false, false, Key::Backslash) => {
+                    let open = self.store.settings.sidebar_open;
+                    self.store.settings.sidebar_open = !open;
+                }
+                (true, false, false, Key::D) => self.editor_duplicate_line(ctx, now),
+                (true, true, false, Key::K) => self.editor_delete_line(ctx, now),
+                (false, false, false, Key::Tab) => self.editor_indent(ctx, now, false),
+                (false, true, false, Key::Tab) => self.editor_indent(ctx, now, true),
                 (true, false, false, Key::F) => {
                     self.side = SideTab::Search;
                     self.store.settings.sidebar_open = true;
+                    if let Some((a, b)) = self.editor_cursor_chars(ctx) {
+                        if b > a {
+                            let sel = self
+                                .tab()
+                                .map(|t| {
+                                    let ba = char_to_byte(&t.text, a);
+                                    let bb = char_to_byte(&t.text, b);
+                                    t.text[ba..bb].to_string()
+                                })
+                                .unwrap_or_default();
+                            if !sel.is_empty() && sel.chars().count() < 120 {
+                                self.search.query = sel;
+                            }
+                        }
+                    }
+                    self.run_search();
+                }
+                (true, false, false, Key::H) => {
+                    self.dialog = Some(Dialog::Replace {
+                        find: String::new(),
+                        replace: String::new(),
+                    });
                 }
                 (true, false, false, Key::Comma) => self.dialog = Some(Dialog::Settings),
                 (true, false, false, Key::U) => {
@@ -673,6 +773,16 @@ impl App {
                 (true, false, false, Key::Num0) => {
                     self.store.settings.font_size = 16.0;
                 }
+                (true, false, false, Key::Home) => {
+                    if let Some(t) = self.tab_mut() {
+                        t.restore_read = Some(0.0);
+                    }
+                }
+                (true, false, false, Key::End) => {
+                    if let Some(t) = self.tab_mut() {
+                        t.restore_read = Some(f32::MAX);
+                    }
+                }
                 (false, false, false, Key::Escape) => {
                     self.menu = None;
                     self.palette.open = false;
@@ -684,10 +794,160 @@ impl App {
                     if self.minimal {
                         self.minimal = false;
                     }
+                    self.tab_menu = None;
+                    self.tab_menu = None;
+                    self.viewer = None;
                 }
                 _ => {}
             }
         }
+    }
+
+    fn focused_editor(&self, ctx: &Context) -> bool {
+        ctx.memory(|m| m.focused()) == Some(self.editor_id())
+    }
+
+    /// 编辑器光标/选区（字符下标，a<=b）
+    fn editor_cursor_chars(&self, ctx: &Context) -> Option<(usize, usize)> {
+        let state = egui::text_edit::TextEditState::load(ctx, self.editor_id())?;
+        let range = state.cursor.char_range()?;
+        let a = range.primary.index.min(range.secondary.index).0;
+        let b = range.primary.index.max(range.secondary.index).0;
+        Some((a, b))
+    }
+
+    fn editor_store_cursor(&self, ctx: &Context, a: usize, b: usize) {
+        if let Some(mut st) = egui::text_edit::TextEditState::load(ctx, self.editor_id()) {
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(a),
+                egui::text::CCursor::new(b),
+            )));
+            st.store(ctx, self.editor_id());
+        }
+    }
+
+    /// (行起始, 行末不含换行, 下一行起始含换行)
+    fn line_bounds(text: &str, byte: usize) -> (usize, usize, usize) {
+        let b = byte.min(text.len());
+        let start = text[..b].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let end = text[b..].find('\n').map(|i| b + i).unwrap_or(text.len());
+        (start, end, ((end + 1) as u64).min(text.len() as u64) as usize)
+    }
+
+    /// 编辑文本统一收口：rev/dirty/needs_parse/撤销窗口失效
+    fn editor_touch(&mut self, tab_idx: usize, now: f64) {
+        if let Some(t) = self.tabs.get_mut(tab_idx) {
+            t.rev = t.rev.wrapping_add(1);
+            t.win_valid = false;
+            t.dirty = true;
+            t.needs_parse = true;
+            t.last_edit = now;
+        }
+    }
+
+    /// Ctrl+D：复制当前行到下一行
+    pub fn editor_duplicate_line(&mut self, ctx: &Context, now: f64) {
+        if !self.focused_editor(ctx) {
+            return;
+        }
+        let Some((_, cb)) = self.editor_cursor_chars(ctx) else { return };
+        let idx = self.active;
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let byte = char_to_byte(&tab.text, cb);
+        let (ls, le, next) = Self::line_bounds(&tab.text, byte);
+        let line = tab.text[ls..le].to_string();
+        let insert_at = next.max(le);
+        let mut out = String::with_capacity(tab.text.len() + line.len() + 1);
+        out.push_str(&tab.text[..insert_at]);
+        out.push_str(&line);
+        out.push('\n');
+        out.push_str(&tab.text[insert_at..]);
+        tab.text = out;
+        let new_cursor = tab.text[..insert_at + line.len() + 1].chars().count();
+        self.editor_touch(idx, now);
+        self.editor_store_cursor(ctx, new_cursor, new_cursor);
+    }
+
+    /// Ctrl+Shift+K：删除当前行
+    pub fn editor_delete_line(&mut self, ctx: &Context, now: f64) {
+        if !self.focused_editor(ctx) {
+            return;
+        }
+        let Some((_, cb)) = self.editor_cursor_chars(ctx) else { return };
+        let idx = self.active;
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let byte = char_to_byte(&tab.text, cb);
+        let (ls, le, next) = Self::line_bounds(&tab.text, byte);
+        let end = if le < next { next } else { le };
+        tab.text.replace_range(ls..end, "");
+        let cursor = tab.text[..ls].chars().count();
+        self.editor_touch(idx, now);
+        self.editor_store_cursor(ctx, cursor, cursor);
+    }
+
+    /// Tab / Shift+Tab：整块缩进与反缩进
+    pub fn editor_indent(&mut self, ctx: &Context, now: f64, outdent: bool) {
+        if !self.focused_editor(ctx) {
+            return;
+        }
+        let consumed = ctx.input_mut(|i| {
+            if outdent {
+                i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)
+            } else {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+            }
+        });
+        if !consumed {
+            return;
+        }
+        let Some((ca, cb)) = self.editor_cursor_chars(ctx) else { return };
+        let idx = self.active;
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let byte_a = char_to_byte(&tab.text, ca);
+        let byte_b = char_to_byte(&tab.text, cb);
+        let ls1 = Self::line_bounds(&tab.text, byte_a).0;
+        let mut ls2 = Self::line_bounds(&tab.text, byte_b).0;
+        if ls2 > ls1 && byte_b == ls2 && byte_b > 0 {
+            ls2 = Self::line_bounds(&tab.text, byte_b - 1).0;
+        }
+        let mut starts = Vec::new();
+        if ls2 > ls1 {
+            let mut scan = ls1;
+            while scan <= ls2 {
+                starts.push(scan);
+                let Some(nl) = tab.text[scan..].find('\n') else { break };
+                scan += nl + 1;
+            }
+        } else {
+            starts.push(ls1);
+        }
+        let mut delta_a = 0i32;
+        let mut delta_b = 0i32;
+        for &st in starts.iter().rev() {
+            let d = if outdent {
+                let seg = &tab.text[st..];
+                let strip = (seg.len() - seg.trim_start_matches(' ').len()).min(4);
+                if strip > 0 {
+                    tab.text.replace_range(st..st + strip, "");
+                    -(strip as i32)
+                } else {
+                    0
+                }
+            } else {
+                tab.text.insert_str(st, "    ");
+                4
+            };
+            if st <= byte_a {
+                delta_a += d;
+            }
+            if st <= byte_b {
+                delta_b += d;
+            }
+        }
+        let na = (ca as i32 + delta_a).max(0) as usize;
+        let nb = (cb as i32 + delta_b).max(0) as usize;
+        self.editor_touch(idx, now);
+        self.editor_store_cursor(ctx, na, nb);
     }
 
     /// 给选中文本加包裹标记（Ctrl+B / Ctrl+I）
@@ -777,6 +1037,113 @@ impl App {
         }
         self.open_workspace(dir);
         self.toast("已打开内置示例", now);
+    }
+
+    // -- 交互增强 ----------------------------------------------------------
+
+    /// 拖拽落盘：md/txt 文件新标签打开，文件夹作为工作区
+    pub fn handle_drops(&mut self, ctx: &Context, now: f64) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        let mut files = 0usize;
+        let mut dirs = 0usize;
+        for f in &dropped {
+            let p = f.path().to_path_buf();
+            if p.is_dir() {
+                self.open_workspace(p.clone());
+                dirs += 1;
+            } else if p.is_file() {
+                self.open_path(p.clone());
+                files += 1;
+            }
+        }
+        let mut msg = String::new();
+        if files > 0 {
+            msg.push_str(&format!("已打开 {} 个文件", files));
+        }
+        if dirs > 0 {
+            if !msg.is_empty() {
+                msg.push_str("、");
+            }
+            msg.push_str(&format!("{} 个工作区", dirs));
+        }
+        if !msg.is_empty() {
+            self.toast(msg, now);
+        }
+    }
+
+    /// 拖拽悬停：全屏提示层
+    pub fn draw_drag_overlay(&self, ctx: &Context, _now: f64) {
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if !hovering {
+            return;
+        }
+        let pal = self.pal.clone();
+        let screen = ctx
+            .input(|i| i.viewport().inner_rect.unwrap_or(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )));
+        egui::Area::new(egui::Id::new("drop-overlay"))
+            .fixed_pos(screen.min)
+            .order(egui::Order::Tooltip)
+            .show(ctx, |ui| {
+                let r = ui.max_rect();
+                ui.painter().rect_filled(r, 0, alpha(pal.accent, 30));
+                let inner = r.shrink(22.0);
+                ui.painter().rect_stroke(
+                    inner,
+                    CornerRadius::same(16),
+                    Stroke::new(2.0, pal.accent),
+                    egui::StrokeKind::Inside,
+                );
+                let text = "松开即打开 · 文件进新标签，文件夹进工作区";
+                let g = ui.painter().layout_no_wrap(
+                    text.to_string(),
+                    egui::FontId::new(20.0, pal.bold()),
+                    pal.text,
+                );
+                ui.painter().galley(r.center() - g.size() / 2.0, g, pal.text);
+            });
+    }
+
+    /// Ctrl+滚轮缩放字号
+    pub fn handle_wheel_zoom(&mut self, ctx: &Context) {
+        let (ctrl, dy) = ctx.input(|i| (i.modifiers.ctrl, i.smooth_scroll_delta.y));
+        if !ctrl || dy.abs() < 0.01 {
+            return;
+        }
+        let step = if dy > 0.0 { 1.0 } else { -1.0 };
+        self.store.settings.font_size =
+            (self.store.settings.font_size + step).clamp(12.0, 26.0);
+    }
+
+    /// 外部修改检测：未编辑自动重载；编辑中提示一次
+    pub fn check_external_change(&mut self, now: f64) {
+        let Some(tab) = self.tab_mut() else { return };
+        if tab.dirty || tab.ext_stale {
+            return;
+        }
+        let Some(mt) = files::mtime(&tab.path) else { return };
+        let Some(last) = tab.mtime else { return };
+        if mt == last {
+            return;
+        }
+        if let Ok((text, crlf)) = files::read_doc(&tab.path) {
+            tab.text = text;
+            tab.crlf = crlf;
+            tab.rev = tab.rev.wrapping_add(1);
+            tab.win_valid = false;
+            tab.needs_parse = true;
+            tab.mtime = files::mtime(&tab.path);
+            tab.ext_stale = false;
+            let name = tab.title.clone();
+            self.toast(format!("「{name}」已被外部修改，已自动重新加载"), now);
+        } else {
+            tab.ext_stale = true;
+        }
     }
 
     pub fn export_html(&mut self, now: f64) {
@@ -869,6 +1236,9 @@ impl App {
         self.now = now;
 
         self.handle_shortcuts(&ctx, now);
+        self.handle_drops(ui.ctx(), now);
+        self.handle_wheel_zoom(ui.ctx());
+        self.check_external_change(now);
         self.parse_pending(now);
 
         // 更新检查：轮询后台结果
@@ -915,9 +1285,10 @@ impl App {
                 )
                 .show(ui, |ui| self.ui_minimal_bar(ui, now));
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(self.pal.bg))
+                .frame(egui::Frame::new().fill(self.pal.content))
                 .show(ui, |ui| self.ui_minimal_content(ui, now));
             self.ui_overlays(&ctx, now);
+            self.draw_drag_overlay(&ctx, now);
             return;
         }
 
@@ -954,13 +1325,23 @@ impl App {
                 });
         }
 
+        // Win11 Explorer 式内容卡片：侧栏打开时左上圆角
+        let card = egui::Frame::new()
+            .fill(self.pal.content)
+            .corner_radius(egui::CornerRadius {
+                nw: if self.store.settings.sidebar_open { 10 } else { 0 },
+                ne: 0,
+                sw: 0,
+                se: 0,
+            });
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(self.pal.bg))
+            .frame(card)
             .show(ui, |ui| {
                 self.ui_main(ui, now);
             });
 
         self.ui_overlays(&ctx, now);
+        self.draw_drag_overlay(&ctx, now);
     }
 }
 
@@ -1045,6 +1426,16 @@ fn html_escape(s: &str) -> String {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        // 记录窗口位置/尺寸，退出时还原
+        let (vouter, vinner) = ui.ctx().input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect)
+        });
+        if let (Some(outer), Some(r)) = (vouter, vinner) {
+            if outer.min.x.is_finite() && outer.min.y.is_finite() {
+                self.win_rect = Some([outer.min.x, outer.min.y, r.width(), r.height()]);
+            }
+        }
         if self.titlebar_theme != Some(self.store.settings.theme) {
             crate::win::apply(frame, self.pal.dark);
             self.titlebar_theme = Some(self.store.settings.theme);
@@ -1061,6 +1452,24 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist();
+    }
+}
+
+/// 读系统明暗偏好（Win11 设置里的「选择默认 Windows 模式」）
+fn system_prefers_dark() -> bool {
+    if let Ok(out) = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            "/v",
+            "AppsUseLightTheme",
+        ])
+        .output()
+    {
+        let s = String::from_utf8_lossy(&out.stdout);
+        s.contains("0x0")
+    } else {
+        false
     }
 }
 

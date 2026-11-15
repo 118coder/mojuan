@@ -44,6 +44,9 @@ pub struct Settings {
     /// 带文件路径启动时进入极简模式（打开即见内容，类似记事本）
     #[serde(default = "default_true")]
     pub minimal_open: bool,
+    /// 主题跟随系统明暗（Win11 深色模式）
+    #[serde(default = "default_true")]
+    pub theme_auto: bool,
     pub last_workspace: Option<String>,
     pub last_file: Option<String>,
     /// 窗口位置与尺寸 [x, y, w, h]
@@ -69,6 +72,7 @@ impl Default for Settings {
             check_updates: true,
             update_repo: String::new(),
             minimal_open: true,
+            theme_auto: false,
             last_workspace: None,
             last_file: None,
             window: None,

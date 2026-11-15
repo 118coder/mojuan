@@ -10,7 +10,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
-use eframe::egui::{Pos2, Rect, ScrollArea, Ui, Vec2};
+use eframe::egui::{Pos2, Rect, ScrollArea, Sense, Ui, Vec2};
 use mojuan_core::doc::{Block, Doc};
 use mojuan_core::large;
 use mojuan_core::vindex::{HeightTree, VIndex, VKind};
@@ -141,7 +141,7 @@ pub fn render(
     restore: Option<f32>,
     dev_scroll: Option<f32>,
     plain: bool,
-) -> (Vec<preview::Action>, f32) {
+) -> (Vec<preview::Action>, f32, f32) {
     let total_w = ui.available_width();
     let col_w = if opts.compact {
         (total_w - 48.0).max(240.0)
@@ -154,7 +154,7 @@ pub fn render(
     let n = state.index.as_ref().map(|i| i.blocks.len()).unwrap_or(0);
     if n == 0 {
         ui.add_space(40.0);
-        return (Vec::new(), 0.0);
+        return (Vec::new(), 0.0, 0.0);
     }
 
     // 目录跳转：把锚点换算成 y，直接设滚动偏移，不必先渲染那一块
@@ -241,17 +241,30 @@ pub fn render(
     });
 
     let offset = out.state.clamped_offset().y;
-    // 右侧极细的阅读进度条：千万字文档里也能一眼知道读到哪儿
+    // 右侧极细的阅读进度条：可点击/拖拽跳转
     let total = state.total().max(outer.height());
     let thumb = (outer.height() * outer.height() / total).max(26.0).min(outer.height());
     let span = (outer.height() - thumb).max(1.0);
     let frac = (offset / (total - outer.height()).max(1.0)).clamp(0.0, 1.0);
     let bar = Rect::from_min_size(
-        Pos2::new(outer.max.x - 3.0, outer.min.y + span * frac),
-        Vec2::new(2.0, thumb),
+        Pos2::new(outer.max.x - 6.0, outer.min.y),
+        Vec2::new(6.0, outer.height()),
     );
-    ui.painter()
-        .rect_filled(bar, 1, alpha(pal.accent, 110));
+    let bar_resp = ui.allocate_rect(bar, Sense::click() | Sense::drag());
+    if let Some(pos) = bar_resp.interact_pointer_pos() {
+        let f = ((pos.y - bar.min.y) / bar.height()).clamp(0.0, 1.0);
+        if bar_resp.dragged() || bar_resp.clicked() {
+            acts.push(preview::Action::ScrollTo(f * (total - outer.height())));
+        }
+    }
+    ui.painter().rect_filled(
+        Rect::from_min_size(
+            Pos2::new(outer.max.x - 3.0, outer.min.y + span * frac),
+            Vec2::new(2.0, thumb),
+        ),
+        1,
+        alpha(pal.accent, 110),
+    );
 
-    (acts, offset)
+    (acts, offset, total)
 }
