@@ -55,9 +55,10 @@ impl App {
                 ui.add_space(pad);
                 ui.vertical(|ui| {
                     ui.set_width(col_w);
+                    let wrap_on = self.store.settings.editor_wrap;
                     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
                         // txt 保持纯文本：不做 Markdown 着色
-                        let job = if plain {
+                        let mut job = if plain {
                             let mut j = egui::text::LayoutJob::default();
                             j.append(
                                 buf.as_str(),
@@ -72,6 +73,10 @@ impl App {
                         } else {
                             md_highlight::job(buf.as_str(), &pal, fs, wrap)
                         };
+                        // 记事本式「自动换行」开关：关闭 = 横向滚动
+                        if !wrap_on {
+                            job.wrap.max_width = f32::INFINITY;
+                        }
                         ui.ctx().fonts_mut(|f| f.layout_job(job))
                     };
                     let resp = ui.add(

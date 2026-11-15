@@ -65,6 +65,7 @@ pub(crate) fn render(app: &mut App, ui: &mut Ui, split: bool, now: f64) {
     };
     let line_h = fs * 1.72;
 
+    let wrap_on = app.store.settings.editor_wrap;
     let idx = app.active;
     let tab = &mut app.tabs[idx];
 
@@ -120,7 +121,7 @@ pub(crate) fn render(app: &mut App, ui: &mut Ui, split: bool, now: f64) {
                 let plain = tab.plain;
                 let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
                     // txt 保持纯文本：不做 Markdown 着色
-                    let job = if plain {
+                    let mut job = if plain {
                         let mut j = egui::text::LayoutJob::default();
                         j.append(
                             buf.as_str(),
@@ -132,6 +133,9 @@ pub(crate) fn render(app: &mut App, ui: &mut Ui, split: bool, now: f64) {
                     } else {
                         md_highlight::job(buf.as_str(), &pal, fs, wrap)
                     };
+                    if !wrap_on {
+                        job.wrap.max_width = f32::INFINITY;
+                    }
                     ui.ctx().fonts_mut(|f| f.layout_job(job))
                 };
                 let resp = ui.add(

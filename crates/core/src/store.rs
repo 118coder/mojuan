@@ -50,6 +50,12 @@ pub struct Settings {
     /// 上次阅读滚动位置（重开文档恢复）
     #[serde(default)]
     pub last_scroll: f32,
+    /// 编辑器自动换行（关闭 = 横向滚动，记事本「自动换行」开关）
+    #[serde(default = "default_true")]
+    pub editor_wrap: bool,
+    /// 显示状态栏
+    #[serde(default = "default_true")]
+    pub show_status: bool,
     pub last_workspace: Option<String>,
     pub last_file: Option<String>,
     /// 窗口位置与尺寸 [x, y, w, h]
@@ -77,6 +83,8 @@ impl Default for Settings {
             minimal_open: true,
             theme_auto: false,
             last_scroll: 0.0,
+            editor_wrap: true,
+            show_status: true,
             last_workspace: None,
             last_file: None,
             window: None,

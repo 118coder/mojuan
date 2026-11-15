@@ -31,6 +31,11 @@ enum Cmd {
     Replace,
     RevealInExplorer,
     Fullscreen,
+    FindDoc,
+    Print,
+    InsertTime,
+    GotoLine,
+    SaveGbk,
 }
 
 struct CmdItem {
@@ -57,6 +62,11 @@ fn commands() -> Vec<CmdItem> {
         CmdItem { label: "显示 / 隐藏侧栏", hint: "Ctrl+", cmd: Cmd::ToggleSidebar },
         CmdItem { label: "在资源管理器中显示", hint: "", cmd: Cmd::RevealInExplorer },
         CmdItem { label: "全屏切换", hint: "F11", cmd: Cmd::Fullscreen },
+        CmdItem { label: "在文档中查找", hint: "Ctrl+F", cmd: Cmd::FindDoc },
+        CmdItem { label: "打印…", hint: "Ctrl+P", cmd: Cmd::Print },
+        CmdItem { label: "插入日期时间", hint: "F5", cmd: Cmd::InsertTime },
+        CmdItem { label: "跳转到行", hint: "Ctrl+G", cmd: Cmd::GotoLine },
+        CmdItem { label: "另存为 GBK 编码", hint: "", cmd: Cmd::SaveGbk },
     ]
 }
 
@@ -68,6 +78,10 @@ enum Pick {
 
 impl App {
     pub(crate) fn ui_overlays(&mut self, ctx: &egui::Context, now: f64) {
+        // 文档内查找浮条
+        if self.find.is_some() {
+            self.ui_find_bar(ctx, now);
+        }
         // 图片全屏查看器
         if let Some(key) = self.viewer.clone() {
             let pal = self.pal.clone();
@@ -451,6 +465,14 @@ impl App {
                 self.fullscreen = !self.fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
             }
+            Cmd::FindDoc => self.find_open(ctx),
+            Cmd::Print => self.print_doc(now),
+            Cmd::InsertTime => {
+                let ts = crate::win::local_time_str();
+                self.editor_insert_text(ctx, now, &ts);
+            }
+            Cmd::GotoLine => self.dialog = Some(Dialog::Goto { input: String::new() }),
+            Cmd::SaveGbk => self.save_as_gbk(now),
             Cmd::Settings => self.dialog = Some(Dialog::Settings),
             Cmd::ClearRecent => {
                 self.store.recent.clear();
@@ -509,6 +531,90 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// 文档内查找浮条（记事本式，右上角）
+    fn ui_find_bar(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(mut f) = self.find.clone() else { return };
+        let pal = self.pal.clone();
+        let mut action: Option<u8> = None; // 1=下一个 2=上一个 3=关闭 4=切换大小写
+        let screen = ctx.input(|i| i.viewport().outer_rect.unwrap_or(egui::Rect::NOTHING));
+        egui::Area::new(egui::Id::unique("find-bar"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::Pos2::new(
+                (screen.max.x - 500.0).max(screen.min.x + 12.0),
+                screen.min.y + 52.0,
+            ))
+            .show(ctx, |ui| {
+                widgets::menu_frame(&pal).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if widgets::text_button(ui, &pal, if f.case_sensitive { "Aa" } else { "aa" }, f.case_sensitive)
+                            .on_hover_text("区分大小写")
+                            .clicked()
+                        {
+                            action = Some(4);
+                        }
+                        let resp = ui.add(
+                            TextEdit::singleline(&mut f.query)
+                                .hint_text(RichText::new("在文档中查找…").color(pal.text_faint))
+                                .desired_width(200.0)
+                                .margin(Margin::symmetric(8, 5)),
+                        );
+                        if resp.changed() {
+                            f.idx = 0;
+                        }
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            action = Some(1);
+                        }
+                        let total = f.matches.len();
+                        let cur = if total == 0 { 0 } else { f.idx + 1 };
+                        ui.label(
+                            RichText::new(format!("{cur}/{total}"))
+                                .size(12.0)
+                                .family(pal.mono())
+                                .color(if total == 0 { pal.text_faint } else { pal.accent }),
+                        );
+                        if widgets::text_button(ui, &pal, "↑", false)
+                            .on_hover_text("上一个  Shift+F3")
+                            .clicked()
+                        {
+                            action = Some(2);
+                        }
+                        if widgets::text_button(ui, &pal, "↓", false)
+                            .on_hover_text("下一个  F3 / Enter")
+                            .clicked()
+                        {
+                            action = Some(1);
+                        }
+                        if widgets::text_button(ui, &pal, "✕", false).clicked() {
+                            action = Some(3);
+                        }
+                    });
+                });
+            });
+        // Esc 关闭
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            action = Some(3);
+        }
+        match action {
+            Some(1) => {
+                self.find = Some(f);
+                self.find_move(ctx, 1);
+            }
+            Some(2) => {
+                self.find = Some(f);
+                self.find_move(ctx, -1);
+            }
+            Some(3) => self.find = None,
+            Some(4) => {
+                f.case_sensitive = !f.case_sensitive;
+                self.find = Some(f);
+            }
+            _ => {
+                self.find = Some(f);
+            }
+        }
+        let _ = now;
     }
 
     // -- 右键菜单 ---------------------------------------------------------

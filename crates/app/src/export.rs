@@ -1000,6 +1000,22 @@ const PAGE_MARGIN_MM: f32 = 18.0;
 
 pub fn export_pdf(text: &str, base: Option<&Path>, title: &str, out: &Path) -> Result<String, String> {
     let hdc = open_pdf_dc().ok_or("系统里没有找到 PDF 打印机（需要启用 Microsoft Print to PDF）")?;
+    let r = print_to_dc(hdc, text, base, title, Some(out));
+    unsafe {
+        DeleteDC(hdc);
+    }
+    r?;
+    Ok(format!("已导出 PDF：{title}"))
+}
+
+/// 把文档画到打印机 DC：output = Some(路径) 落 PDF 文件；None 直接打印
+pub(crate) fn print_to_dc(
+    hdc: HDC,
+    text: &str,
+    base: Option<&Path>,
+    title: &str,
+    output: Option<&Path>,
+) -> Result<(), String> {
     let caches: (ImgCache, ImgCache) =
         (Rc::new(RefCell::new(HashMap::new())), Rc::new(RefCell::new(HashMap::new())));
     let ret = (|| -> Result<(), String> {
@@ -1013,11 +1029,11 @@ pub fn export_pdf(text: &str, base: Option<&Path>, title: &str, out: &Path) -> R
             let bottom = page_h - margin;
 
             let mut doc_name = wide(&format!("{title} · 墨卷"));
-            let mut out_path = wide(&out.to_string_lossy());
+            let mut out_path = output.map(|p| wide(&p.to_string_lossy()));
             let docinfo = DOCINFOW {
                 cb_size: std::mem::size_of::<DOCINFOW>() as i32,
                 doc_name: doc_name.as_mut_ptr(),
-                output: out_path.as_mut_ptr(),
+                output: out_path.as_mut().map(|w| w.as_mut_ptr()).unwrap_or(std::ptr::null_mut()),
                 data_type: std::ptr::null(),
                 fw_type: 0,
             };
@@ -1061,11 +1077,72 @@ pub fn export_pdf(text: &str, base: Option<&Path>, title: &str, out: &Path) -> R
         }
         Ok(())
     })();
-    unsafe {
-        DeleteDC(hdc);
+    ret
+}
+
+/// Ctrl+P：弹出系统打印对话框，把当前文档发给所选打印机
+pub fn print_with_dialog(text: &str, base: Option<&Path>, title: &str) -> Result<String, String> {
+    #[repr(C)]
+    struct PRINTDLGW {
+        l_struct_size: u32,
+        hwnd_owner: isize,
+        h_dev_mode: isize,
+        h_dev_names: isize,
+        h_dc: isize,
+        flags: u32,
+        n_from_page: u16,
+        n_to_page: u16,
+        n_min_page: u16,
+        n_max_page: u16,
+        n_copies: u16,
+        h_instance: isize,
+        lp_setup_template_name: *const u16,
+        h_print_template: isize,
+        h_setup_template: isize,
     }
-    ret?;
-    Ok(format!("已导出 PDF：{title}"))
+    #[link(name = "comdlg32")]
+    extern "system" {
+        fn PrintDlgW(lppd: *mut PRINTDLGW) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalFree(h: isize) -> isize;
+    }
+    const PD_RETURNDC: u32 = 0x0000_0100;
+    const PD_HIDEPRINTTOFILE: u32 = 0x0010_0000;
+    const PD_DISABLEPRINTTOFILE: u32 = 0x0008_0000;
+    unsafe {
+        let mut pd = PRINTDLGW {
+            l_struct_size: std::mem::size_of::<PRINTDLGW>() as u32,
+            hwnd_owner: 0,
+            h_dev_mode: 0,
+            h_dev_names: 0,
+            h_dc: 0,
+            flags: PD_RETURNDC | PD_HIDEPRINTTOFILE | PD_DISABLEPRINTTOFILE,
+            n_from_page: 1,
+            n_to_page: 1,
+            n_min_page: 1,
+            n_max_page: 1,
+            n_copies: 1,
+            h_instance: 0,
+            lp_setup_template_name: std::ptr::null(),
+            h_print_template: 0,
+            h_setup_template: 0,
+        };
+        if PrintDlgW(&mut pd) == 0 || pd.h_dc == 0 {
+            return Ok("打印已取消".to_string());
+        }
+        let r = print_to_dc(pd.h_dc, text, base, title, None);
+        if pd.h_dev_mode != 0 {
+            GlobalFree(pd.h_dev_mode);
+        }
+        if pd.h_dev_names != 0 {
+            GlobalFree(pd.h_dev_names);
+        }
+        DeleteDC(pd.h_dc);
+        r?;
+        Ok("已发送打印任务".to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------

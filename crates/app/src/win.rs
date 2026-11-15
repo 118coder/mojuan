@@ -87,3 +87,36 @@ pub fn local_time_str() -> String {
         )
     }
 }
+
+
+/// UTF-8 → GBK 字节（ANSI 另存用）。含无法映射字符时返回 None。
+pub fn utf8_to_gbk(s: &str) -> Option<Vec<u8>> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn WideCharToMultiByte(
+            code_page: u32, flags: u32, src: *const u16, src_len: i32,
+            dst: *mut u8, dst_len: i32, default_char: *const u8, used_default: *mut u8,
+        ) -> i32;
+    }
+    const CP_GBK: u32 = 936;
+    let wide: Vec<u16> = s.encode_utf16().collect();
+    unsafe {
+        let n = WideCharToMultiByte(
+            CP_GBK, 0, wide.as_ptr(), wide.len() as i32,
+            std::ptr::null_mut(), 0, std::ptr::null(), std::ptr::null_mut(),
+        );
+        if n <= 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; n as usize];
+        let mut used_default = 0u8;
+        WideCharToMultiByte(
+            CP_GBK, 0, wide.as_ptr(), wide.len() as i32,
+            buf.as_mut_ptr(), n, std::ptr::null(), &mut used_default,
+        );
+        if used_default != 0 {
+            return None; // 有字符无法映射成 GBK
+        }
+        Some(buf)
+    }
+}

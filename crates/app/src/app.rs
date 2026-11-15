@@ -54,6 +54,8 @@ pub struct Tab {
     /// 阅读区内容总高 / 视口高（状态栏百分比用）
     pub read_total: f32,
     pub read_view: f32,
+    /// 总行数缓存（0 = 未计算）
+    pub line_count: usize,
     /// 大文档虚拟预览状态（每个标签独立）
     pub vpreview: crate::ui::vpreview::State,
     /// 行起始字节表（大文档编辑窗口用；懒构建）
@@ -92,6 +94,7 @@ impl Tab {
             ext_stale: false,
             read_total: 0.0,
             read_view: 0.0,
+            line_count: 0,
             vpreview: crate::ui::vpreview::State::default(),
             line_starts: Vec::new(),
             line_starts_rev: 0,
@@ -148,6 +151,16 @@ pub struct Row {
     pub depth: usize,
     pub is_dir: bool,
     pub expanded: bool,
+}
+
+/// 文档内查找（记事本式浮条）
+#[derive(Clone)]
+pub struct FindState {
+    pub query: String,
+    pub case_sensitive: bool,
+    pub idx: usize,
+    pub matches: Vec<usize>,
+    pub rev: u64,
 }
 
 pub enum Dialog {
@@ -229,6 +242,8 @@ pub struct App {
     pub outline_filter: String,
     /// 图片查看器缩放
     pub viewer_scale: f32,
+    /// 文档内查找浮条（Ctrl+F）
+    pub find: Option<FindState>,
 }
 
 impl App {
@@ -293,6 +308,7 @@ impl App {
             tree_scroll_req: false,
             outline_filter: String::new(),
             viewer_scale: 1.0,
+            find: None,
         };
 
         // 恢复上次窗口位置与尺寸（多显示器离屏兜底）
@@ -759,7 +775,8 @@ impl App {
                 (false, false, false, Key::Enter) => self.editor_auto_continue(ctx, now),
                 (false, false, false, Key::Tab) => self.editor_indent(ctx, now, false),
                 (false, true, false, Key::Tab) => self.editor_indent(ctx, now, true),
-                (true, false, false, Key::F) => {
+                (true, false, false, Key::F) => self.find_open(ctx),
+                (true, true, false, Key::F) => {
                     self.side = SideTab::Search;
                     self.store.settings.sidebar_open = true;
                     if let Some((a, b)) = self.editor_cursor_chars(ctx) {
@@ -780,6 +797,15 @@ impl App {
                     self.search_focus = true;
                     self.run_search();
                 }
+                (false, false, false, Key::F5) => {
+                    let ts = crate::win::local_time_str();
+                    self.editor_insert_text(ctx, now, &ts);
+                }
+                (false, false, false, Key::F3) => self.find_move(ctx, 1),
+                (true, false, false, Key::F3) | (false, true, false, Key::F3) => {
+                    self.find_move(ctx, -1);
+                }
+                (true, false, false, Key::P) => self.print_doc(now),
                 (true, false, false, Key::G) => {
                     self.dialog = Some(Dialog::Goto { input: String::new() });
                 }
@@ -835,6 +861,7 @@ impl App {
                     self.tab_menu = None;
                     self.tab_menu = None;
                     self.viewer = None;
+                    self.find = None;
                 }
                 _ => {}
             }
@@ -880,6 +907,7 @@ impl App {
             t.dirty = true;
             t.needs_parse = true;
             t.last_edit = now;
+            t.line_count = 0;
         }
     }
 
@@ -1113,6 +1141,162 @@ impl App {
         let nb = (cb as i32 + delta_b).max(0) as usize;
         self.editor_touch(idx, now);
         self.editor_store_cursor(ctx, na, nb);
+    }
+
+    // -- 文档内查找（记事本式） ---------------------------------------------
+
+    fn find_matches(text: &str, q: &str, case_sensitive: bool) -> Vec<usize> {
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let (hay, needle) = if case_sensitive {
+            (text.to_string(), q.to_string())
+        } else {
+            (text.to_lowercase(), q.to_lowercase())
+        };
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        while let Some(b) = hay[start..].find(&needle) {
+            let abs = start + b;
+            out.push(hay[..abs].chars().count());
+            start = abs + needle.len();
+        }
+        out
+    }
+
+    /// Ctrl+F：打开/聚焦查找条
+    pub fn find_open(&mut self, ctx: &Context) {
+        if self.store.settings.mode == mojuan_core::ViewMode::Read {
+            self.store.settings.mode = mojuan_core::ViewMode::Split;
+        }
+        let sel = self.editor_cursor_chars(ctx).and_then(|(a, b)| {
+            (b > a).then(|| {
+                self.tab().map(|t| {
+                    let ba = char_to_byte(&t.text, a);
+                    let bb = char_to_byte(&t.text, b);
+                    t.text[ba..bb].to_string()
+                })
+            }).flatten()
+        }).unwrap_or_default();
+        let (matches, rev) = self.tab().map(|t| {
+            (
+                Self::find_matches(&t.text, &sel, false),
+                t.rev,
+            )
+        }).unwrap_or((Vec::new(), 0));
+        self.find = Some(FindState {
+            query: sel,
+            case_sensitive: false,
+            idx: 0,
+            matches,
+            rev,
+        });
+    }
+
+    /// F3 / Shift+F3：下一个 / 上一个
+    pub fn find_move(&mut self, ctx: &Context, dir: i32) {
+        let Some(f) = &mut self.find else {
+            self.find_open(ctx);
+            return;
+        };
+        if f.matches.is_empty() {
+            return;
+        }
+        let n = f.matches.len();
+        f.idx = if dir > 0 {
+            (f.idx + 1) % n
+        } else {
+            (f.idx + n - 1) % n
+        };
+        let i = f.idx;
+        let qlen = f.query.chars().count();
+        let a = f.matches[i];
+        let b = a + qlen;
+        self.editor_store_cursor(ctx, a, b);
+        if let Some(mut st) = egui::text_edit::TextEditState::load(ctx, self.editor_id()) {
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(a),
+                egui::text::CCursor::new(b),
+            )));
+            st.store(ctx, self.editor_id());
+        }
+        ctx.memory_mut(|m| m.request_focus(self.editor_id()));
+    }
+
+    /// 查找条输入变化后重算
+    pub fn find_refresh(&mut self) {
+        let (query, case_sensitive, rev) = match &self.find {
+            Some(f) => (f.query.clone(), f.case_sensitive, f.rev),
+            None => return,
+        };
+        let Some(t) = self.tab() else { return };
+        let matches = Self::find_matches(&t.text, &query, case_sensitive);
+        let cur_rev = t.rev;
+        drop(t);
+        if let Some(f) = &mut self.find {
+            f.rev = cur_rev;
+            f.matches = matches;
+            f.idx = f.idx.min(f.matches.len().saturating_sub(1));
+        }
+    }
+
+    /// Ctrl+P：打印
+    pub fn print_doc(&mut self, now: f64) {
+        let title = self.tab().map(|t| t.title.clone()).unwrap_or_default();
+        match self.with_text(|text, base| {
+            crate::export::print_with_dialog(text, base, &title)
+        }) {
+            Ok(msg) => self.toast(msg, now),
+            Err(e) => self.toast(format!("打印失败：{e}"), now),
+        }
+    }
+
+    /// 以 ANSI(GBK) 编码另存
+    pub fn save_as_gbk(&mut self, now: f64) {
+        let Some(tab) = self.tab() else { return };
+        let text = tab.text.clone();
+        let default_name = tab
+            .path
+            .file_stem()
+            .map(|s| format!("{}.txt", s.to_string_lossy()))
+            .unwrap_or_else(|| "未命名.txt".into());
+        if let Some(p) = rfd::FileDialog::new()
+            .set_file_name(default_name)
+            .add_filter("文本文件 (GBK 编码)", &["txt"])
+            .save_file()
+        {
+            match crate::win::utf8_to_gbk(&text) {
+                Some(bytes) => match std::fs::write(&p, bytes) {
+                    Ok(()) => {
+                        let name = files::display_name(&p);
+                        self.toast(format!("已按 GBK 编码保存「{name}」"), now);
+                    }
+                    Err(e) => self.toast(format!("保存失败：{e}"), now),
+                },
+                None => self.toast("内容包含 GBK 无法表示的字符，已取消", now),
+            }
+        }
+    }
+
+    /// 自动换行开关
+    pub fn toggle_wrap(&mut self, now: f64) {
+        let w = self.store.settings.editor_wrap;
+        self.store.settings.editor_wrap = !w;
+        let _ = self.store.save();
+        self.toast(
+            if w { "已关闭自动换行（横向滚动）" } else { "已开启自动换行" },
+            now,
+        );
+    }
+
+    /// 状态栏开关
+    pub fn toggle_status(&mut self, now: f64) {
+        let v = self.store.settings.show_status;
+        self.store.settings.show_status = !v;
+        let _ = self.store.save();
     }
 
     /// 给选中文本加包裹标记（Ctrl+B / Ctrl+I）
@@ -1420,6 +1604,7 @@ impl App {
         self.handle_drops(ui.ctx(), now);
         self.handle_wheel_zoom(ui.ctx());
         self.check_external_change(now);
+        self.find_refresh();
         // 失焦自动保存（autosave 开启时）
         if !ui.ctx().input(|i| i.viewport().focused.unwrap_or(true))
             && self.store.settings.autosave
@@ -1489,6 +1674,7 @@ impl App {
             )
             .show(ui, |ui| self.ui_topbar(ui, now));
 
+        if self.store.settings.show_status {
         egui::Panel::bottom("statusbar")
             .exact_size(26.0)
             .frame(
@@ -1497,6 +1683,7 @@ impl App {
                     .inner_margin(Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| self.ui_statusbar(ui, now));
+        }
 
         if self.store.settings.sidebar_open {
             egui::Panel::left("sidebar")
