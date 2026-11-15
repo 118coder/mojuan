@@ -71,6 +71,11 @@ impl App {
         // 图片全屏查看器
         if let Some(key) = self.viewer.clone() {
             let pal = self.pal.clone();
+            let wheel = ctx.input(|i| i.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                self.viewer_scale = (self.viewer_scale * if wheel > 0.0 { 1.1 } else { 1.0 / 1.1 })
+                    .clamp(0.2, 8.0);
+            }
             let close = ctx.input(|i| i.pointer.any_click() || i.key_pressed(egui::Key::Escape));
             egui::Area::new(egui::Id::unique("image-viewer"))
                 .order(egui::Order::Tooltip)
@@ -89,7 +94,7 @@ impl App {
                         let natural = h.size_vec2();
                         let scale = (screen.width() * 0.9 / natural.x)
                             .min(screen.height() * 0.9 / natural.y)
-                            .min(4.0);
+                            * self.viewer_scale;
                         let draw = natural * scale;
                         let (rect, _) = ui.allocate_exact_size(draw, egui::Sense::hover());
                         let top_left = screen.center() - draw / 2.0;
@@ -121,6 +126,7 @@ impl App {
                 });
             if close {
                 self.viewer = None;
+                self.viewer_scale = 1.0;
             }
         }
 

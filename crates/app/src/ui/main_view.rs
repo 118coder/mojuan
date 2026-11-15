@@ -22,7 +22,15 @@ impl App {
                 .tab()
                 .map(|t| t.title.clone())
                 .unwrap_or_else(|| "墨卷".into());
-            ui.label(RichText::new(title).size(13.0).color(pal.text_dim));
+            // 限宽截断：长文件名不再把右侧按钮挤出窗口
+            let max_w = (ui.available_width() - 200.0).max(80.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(max_w, 18.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.add(egui::Label::new(RichText::new(title).size(13.0).color(pal.text_dim)).truncate());
+                },
+            );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .add(

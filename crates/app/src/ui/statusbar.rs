@@ -88,6 +88,7 @@ impl App {
                         ("已保存", pal.text_faint)
                     };
                     let _ = now;
+                    let path_tip = path.to_string_lossy().replace('\\', "/");
                     let (r, _) = ui.allocate_exact_size(
                         egui::Vec2::new(7.0, 7.0),
                         egui::Sense::hover(),
@@ -97,7 +98,8 @@ impl App {
                         3.0,
                         if dirty { color } else { alpha(pal.check, 200) },
                     );
-                    ui.label(RichText::new(text).size(11.0).color(color));
+                    ui.label(RichText::new(text).size(11.0).color(color))
+                        .on_hover_text(path_tip);
 
                     // 文档类型
                     let ext = path

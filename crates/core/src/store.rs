@@ -47,6 +47,9 @@ pub struct Settings {
     /// 主题跟随系统明暗（Win11 深色模式）
     #[serde(default = "default_true")]
     pub theme_auto: bool,
+    /// 上次阅读滚动位置（重开文档恢复）
+    #[serde(default)]
+    pub last_scroll: f32,
     pub last_workspace: Option<String>,
     pub last_file: Option<String>,
     /// 窗口位置与尺寸 [x, y, w, h]
@@ -73,6 +76,7 @@ impl Default for Settings {
             update_repo: String::new(),
             minimal_open: true,
             theme_auto: false,
+            last_scroll: 0.0,
             last_workspace: None,
             last_file: None,
             window: None,
@@ -92,6 +96,9 @@ pub struct Store {
     pub settings: Settings,
     pub recent: Vec<RecentFile>,
     pub workspaces: Vec<String>,
+    /// 收藏的文档路径
+    #[serde(default)]
+    pub favorites: Vec<String>,
 }
 
 pub fn now_ts() -> i64 {

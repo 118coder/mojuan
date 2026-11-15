@@ -199,6 +199,52 @@ impl App {
                     keep = Some(Dialog::Replace { find, replace });
                 }
             }
+            Dialog::Goto { mut input } => {
+                let pal = self.pal.clone();
+                let mut go = false;
+                let mut close = false;
+                egui::Window::new("跳转到行")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+                    .frame(widgets::menu_frame(&pal))
+                    .show(ctx, |ui| {
+                        ui.set_min_width(320.0);
+                        ui.add_space(4.0);
+                        let resp = ui.add(
+                            TextEdit::singleline(&mut input)
+                                .hint_text(RichText::new("行号，如 128").color(pal.text_faint))
+                                .desired_width(200.0)
+                                .margin(Margin::symmetric(8, 5)),
+                        );
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            go = true;
+                        }
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if widgets::text_button(ui, &pal, "跳转", false).clicked() {
+                                go = true;
+                            }
+                            if widgets::text_button(ui, &pal, "取消", false).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if go {
+                    if let Ok(n) = input.trim().parse::<usize>() {
+                        if n >= 1 {
+                            let path = self.active_path().unwrap_or_default();
+                            self.jump_to_line(path, n);
+                        }
+                    }
+                    close = true;
+                }
+                if close {
+                    keep = None;
+                } else {
+                    keep = Some(Dialog::Goto { input });
+                }
+            }
             Dialog::Settings => {
                 let mut cancel = false;
                 let mut submit = false;

@@ -25,14 +25,16 @@ impl App {
             SideTab::Outline => 1,
             SideTab::Search => 2,
             SideTab::Recent => 3,
+            SideTab::Favorite => 4,
         };
         ui.horizontal(|ui| {
-            if widgets::segmented(ui, &pal, &mut idx, &["文件", "大纲", "搜索", "最近"]) {
+            if widgets::segmented(ui, &pal, &mut idx, &["文件", "大纲", "搜索", "最近", "收藏"]) {
                 self.side = match idx {
                     0 => SideTab::Files,
                     1 => SideTab::Outline,
                     2 => SideTab::Search,
-                    _ => SideTab::Recent,
+                    3 => SideTab::Recent,
+                    _ => SideTab::Favorite,
                 };
                 if self.side == SideTab::Search {
                     self.search.due = Some(now);
@@ -46,6 +48,7 @@ impl App {
             SideTab::Outline => self.side_outline(ui, &pal),
             SideTab::Search => self.side_search(ui, &pal, now),
             SideTab::Recent => self.side_recent(ui, &pal),
+            SideTab::Favorite => self.side_favorites(ui, &pal),
         }
 
         // 底部：工作区路径
@@ -125,6 +128,8 @@ impl App {
         let rows = self.visible_rows();
         let active = self.active_path();
         let mut action: Option<RowAction> = None;
+        let scroll_to_file = std::mem::take(&mut self.tree_scroll_req);
+        let mut scrolled = false;
 
         ScrollArea::vertical()
             .id_salt("tree")
@@ -134,6 +139,10 @@ impl App {
                 for row in rows {
                     let selected = active.as_deref() == Some(row.path.as_path());
                     let resp = file_row(ui, pal, &row, selected);
+                    if scroll_to_file && selected && !scrolled {
+                        ui.scroll_to_rect(resp.rect, Some(egui::Align::Center));
+                        scrolled = true;
+                    }
                     if resp.clicked() {
                         if row.is_dir {
                             action = Some(RowAction::Toggle(row.path.clone()));
@@ -178,9 +187,21 @@ impl App {
             widgets::empty_state(ui, pal, Icon::Outline, "没有打开的文档", "");
             return;
         };
-        let toc = tab.doc.toc.clone();
+        let mut toc = tab.doc.toc.clone();
+        // 标题过滤（长文档快速定位）
+        ui.add(
+            egui::TextEdit::singleline(&mut self.outline_filter)
+                .hint_text(RichText::new("过滤标题…").color(pal.text_faint))
+                .desired_width(f32::INFINITY)
+                .margin(egui::Margin::symmetric(8, 5)),
+        );
+        ui.add_space(4.0);
+        let filter = self.outline_filter.trim().to_lowercase();
+        if !filter.is_empty() {
+            toc.retain(|e| e.text.to_lowercase().contains(&filter));
+        }
         if toc.is_empty() {
-            widgets::empty_state(ui, pal, Icon::Outline, "这篇文档没有标题", "用 # 号开始写标题");
+            widgets::empty_state(ui, pal, Icon::Outline, "没有匹配的标题", "试试换个关键词");
             return;
         }
         let mut jump: Option<String> = None;
@@ -251,6 +272,22 @@ impl App {
             self.search.due = Some(now + 0.25);
             self.search.ran = false;
         }
+        // Ctrl+F 自动聚焦
+        if std::mem::take(&mut self.search_focus) {
+            resp.request_focus();
+        }
+        // Enter 打开第一个结果（文件名命中优先，其次正文首条带行号）
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let target = self.search.result.names.first().map(|n| (n.path.clone(), None))
+                .or_else(|| self.search.result.contents.first().map(|c| (c.path.clone(), Some(c.line_no))));
+            if let Some((p, ln)) = target {
+                self.open_path(p);
+                if let Some(n) = ln {
+                    self.pending_line = Some(n);
+                }
+                self.search.due = None;
+            }
+        }
         ui.add_space(6.0);
 
         if !has_ws {
@@ -315,6 +352,86 @@ impl App {
         }
         if let Some((p, line)) = jump {
             self.jump_to_line(p, line);
+        }
+    }
+
+    fn side_favorites(&mut self, ui: &mut Ui, pal: &Palette) {
+        if self.store.favorites.is_empty() {
+            widgets::empty_state(
+                ui,
+                pal,
+                Icon::Check,
+                "还没有收藏",
+                "更多菜单 → 收藏当前文档",
+            );
+            return;
+        }
+        let mut open: Option<std::path::PathBuf> = None;
+        let mut remove: Option<String> = None;
+        ScrollArea::vertical()
+            .id_salt("favorites")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                for key in self.store.favorites.clone() {
+                    let path = std::path::PathBuf::from(&key);
+                    let name = files::display_name(&path);
+                    let (rect, resp) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), 25.0),
+                        Sense::click(),
+                    );
+                    if resp.hovered() {
+                        ui.painter().rect_filled(
+                            rect,
+                            CornerRadius::same(5),
+                            alpha(pal.text, if pal.dark { 16 } else { 10 }),
+                        );
+                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                    }
+                    let g = ui.painter().layout_no_wrap(
+                        name.clone(),
+                        egui::FontId::new(12.5, egui::FontFamily::Proportional),
+                        pal.text,
+                    );
+                    ui.painter().galley(
+                        Pos2::new(rect.min.x + 10.0, rect.center().y - g.size().y / 2.0),
+                        g,
+                        pal.text,
+                    );
+                    // 移除按钮（hover 显示）
+                    let xr = Rect::from_center_size(
+                        Pos2::new(rect.max.x - 12.0, rect.center().y),
+                        Vec2::splat(16.0),
+                    );
+                    let xresp = ui.interact(
+                        xr,
+                        egui::Id::unique(("fav-x", &key)),
+                        Sense::click(),
+                    );
+                    if xresp.hovered() {
+                        icons::paint(
+                            ui.painter(),
+                            xr.center(),
+                            10.0,
+                            pal.text_dim,
+                            Icon::Close,
+                            pal.panel,
+                        );
+                        if xresp.clicked() {
+                            remove = Some(key.clone());
+                        }
+                    }
+                    if resp.clicked() {
+                        open = Some(path);
+                    }
+                }
+            });
+        if let Some(p) = open {
+            self.open_path(p);
+        }
+        if let Some(key) = remove {
+            self.store.favorites.retain(|s| s != &key);
+            let _ = self.store.save();
         }
     }
 

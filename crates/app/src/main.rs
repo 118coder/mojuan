@@ -42,6 +42,7 @@ fn main() -> eframe::Result<()> {
             let mut app = app::App::new(cc);
             if let Some(p) = open_file {
                 app.open_path(p);
+                app.restore_last_scroll();
                 // 双击/命令行打开：默认极简模式，打开即见内容。
                 // md 先出渲染页（上次会话可能把全局模式留在编辑）；txt 已在 open_path 里设为编辑
                 if app.store.settings.minimal_open {

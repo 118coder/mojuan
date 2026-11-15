@@ -26,6 +26,7 @@ pub enum SideTab {
     Outline,
     Search,
     Recent,
+    Favorite,
 }
 
 pub struct Tab {
@@ -152,6 +153,7 @@ pub struct Row {
 pub enum Dialog {
     NewFile { dir: PathBuf, name: String },
     Replace { find: String, replace: String },
+    Goto { input: String },
     NewFolder { dir: PathBuf, name: String },
     Rename { path: PathBuf, name: String },
     Delete { path: PathBuf, is_dir: bool },
@@ -219,6 +221,14 @@ pub struct App {
     pub viewer: Option<String>,
     /// 最近一帧的窗口位置与内容尺寸（退出时持久化）
     pub win_rect: Option<[f32; 4]>,
+    /// Ctrl+F 后自动聚焦搜索输入框（一次性标记）
+    pub search_focus: bool,
+    /// 文件树滚动定位当前文件（一次性标记）
+    pub tree_scroll_req: bool,
+    /// 大纲过滤关键词
+    pub outline_filter: String,
+    /// 图片查看器缩放
+    pub viewer_scale: f32,
 }
 
 impl App {
@@ -279,6 +289,10 @@ impl App {
             fullscreen: false,
             viewer: None,
             win_rect: None,
+            search_focus: false,
+            tree_scroll_req: false,
+            outline_filter: String::new(),
+            viewer_scale: 1.0,
         };
 
         // 恢复上次窗口位置与尺寸（多显示器离屏兜底）
@@ -299,6 +313,7 @@ impl App {
             let p = PathBuf::from(&f);
             if p.is_file() {
                 app.open_path(p);
+                app.restore_last_scroll();
             }
         }
         // 开发期快捷入口：MJ_UI=outline|search|recent|palette|about|settings|read|edit
@@ -373,6 +388,7 @@ impl App {
     pub fn persist(&mut self) {
         self.store.settings.last_file = self.active_path().map(|p| p.to_string_lossy().to_string());
         self.store.settings.window = self.win_rect;
+        self.store.settings.last_scroll = self.tab().map(|t| t.scroll_read).unwrap_or(0.0);
         let _ = self.store.save();
     }
 
@@ -442,6 +458,18 @@ impl App {
                         self.side = SideTab::Files;
                     }
                 }
+                // 自动展开文件所在目录链，并让文件树滚动定位
+                if let Some(ws) = &mut self.ws {
+                    let mut anc = path.parent();
+                    while let Some(a) = anc {
+                        ws.expanded.insert(a.to_path_buf());
+                        if a == ws.root {
+                            break;
+                        }
+                        anc = a.parent();
+                    }
+                }
+                self.tree_scroll_req = true;
                 let _ = self.store.save();
                 self.search_scroll_reset();
             }
@@ -728,6 +756,7 @@ impl App {
                 }
                 (true, false, false, Key::D) => self.editor_duplicate_line(ctx, now),
                 (true, true, false, Key::K) => self.editor_delete_line(ctx, now),
+                (false, false, false, Key::Enter) => self.editor_auto_continue(ctx, now),
                 (false, false, false, Key::Tab) => self.editor_indent(ctx, now, false),
                 (false, true, false, Key::Tab) => self.editor_indent(ctx, now, true),
                 (true, false, false, Key::F) => {
@@ -748,8 +777,17 @@ impl App {
                             }
                         }
                     }
+                    self.search_focus = true;
                     self.run_search();
                 }
+                (true, false, false, Key::G) => {
+                    self.dialog = Some(Dialog::Goto { input: String::new() });
+                }
+                (true, false, false, Key::T) => {
+                    let ts = crate::win::local_time_str();
+                    self.editor_insert_text(ctx, now, &ts);
+                }
+                (true, true, false, Key::S) => self.save_as(now),
                 (true, false, false, Key::H) => {
                     self.dialog = Some(Dialog::Replace {
                         find: String::new(),
@@ -843,6 +881,133 @@ impl App {
             t.needs_parse = true;
             t.last_edit = now;
         }
+    }
+
+    /// 光标处插入文本（时间戳等）
+    pub fn editor_insert_text(&mut self, ctx: &Context, now: f64, text: &str) {
+        if !self.focused_editor(ctx) {
+            return;
+        }
+        let Some((ca, _)) = self.editor_cursor_chars(ctx) else { return };
+        let idx = self.active;
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let byte = char_to_byte(&tab.text, ca);
+        tab.text.insert_str(byte, text);
+        let nc = tab.text[..byte + text.len()].chars().count();
+        self.editor_touch(idx, now);
+        self.editor_store_cursor(ctx, nc, nc);
+    }
+
+    /// 回车自动续列表：光标行是列表项时接管回车
+    pub fn editor_auto_continue(&mut self, ctx: &Context, now: f64) {
+        if !self.focused_editor(ctx) {
+            return;
+        }
+        let Some((_, cb)) = self.editor_cursor_chars(ctx) else { return };
+        let idx = self.active;
+        let line = {
+            let Some(tab) = self.tabs.get(idx) else { return };
+            let byte = char_to_byte(&tab.text, cb);
+            let (ls, le, _) = Self::line_bounds(&tab.text, byte);
+            tab.text[ls..le].to_string()
+        };
+        let trimmed = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+        let indent = line[..indent_len].to_string();
+        let t = trimmed;
+        let marker: Option<String> = if t == "-" || t == "*" || t == "+" {
+            None // 空项：退出列表
+        } else if t.starts_with("- ")
+            || t.starts_with("* ")
+            || t.starts_with("+ ")
+        {
+            Some(format!("{indent}- "))
+        } else if let Some((num, rest)) = t.split_once(". ") {
+            match num.parse::<u64>() {
+                Ok(n) if !rest.is_empty() => Some(format!("{indent}{}. ", n + 1)),
+                Ok(_) => None, // 空有序项：退出列表
+                Err(_) => return,
+            }
+        } else {
+            return; // 普通行：不接管，交给默认换行
+        };
+        let consumed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if !consumed {
+            return;
+        }
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let byte = char_to_byte(&tab.text, cb);
+        let (ls, le, _) = Self::line_bounds(&tab.text, byte);
+        match marker {
+            Some(prefix) => {
+                let ins = format!("\n{prefix}");
+                tab.text.insert_str(byte, &ins);
+                let nc = tab.text[..byte + ins.len()].chars().count();
+                self.editor_touch(idx, now);
+                self.editor_store_cursor(ctx, nc, nc);
+            }
+            None => {
+                // 清掉前缀，光标停在本行行首
+                tab.text.replace_range(ls..le, "");
+                let nc = tab.text[..ls].chars().count();
+                self.editor_touch(idx, now);
+                self.editor_store_cursor(ctx, nc, nc);
+            }
+        }
+    }
+
+    /// Ctrl+Shift+S：另存为
+    pub fn save_as(&mut self, now: f64) {
+        let Some(tab) = self.tab() else { return };
+        let text = tab.text.clone();
+        let crlf = tab.crlf;
+        let default_name = tab
+            .path
+            .file_stem()
+            .map(|s| format!("{}.md", s.to_string_lossy()))
+            .unwrap_or_else(|| "未命名.md".into());
+        if let Some(p) = rfd::FileDialog::new()
+            .set_file_name(default_name)
+            .add_filter("Markdown", &["md", "markdown", "txt"])
+            .save_file()
+        {
+            match files::write_doc(&p, &text, crlf) {
+                Ok(()) => {
+                    let name = files::display_name(&p);
+                    self.toast(format!("已另存为「{name}」"), now);
+                    self.open_path(p);
+                }
+                Err(e) => self.toast(format!("另存为失败：{e}"), now),
+            }
+        }
+    }
+
+    /// 打开后恢复上次阅读位置
+    pub fn restore_last_scroll(&mut self) {
+        let y = self.store.settings.last_scroll;
+        if y > 1.0 {
+            if let Some(t) = self.tabs.last_mut() {
+                t.restore_read = Some(y);
+            }
+        }
+    }
+
+    /// 收藏 / 取消收藏当前文档
+    pub fn toggle_favorite(&mut self, now: f64) {
+        let Some(p) = self.active_path() else {
+            self.toast("没有打开的文件", now);
+            return;
+        };
+        let key = p.to_string_lossy().to_string();
+        let name = files::display_name(&p);
+        if let Some(i) = self.store.favorites.iter().position(|s| s == &key) {
+            self.store.favorites.remove(i);
+            self.toast(format!("已取消收藏「{name}」"), now);
+        } else {
+            self.store.favorites.push(key);
+            self.toast(format!("已收藏「{name}」"), now);
+        }
+        let _ = self.store.save();
     }
 
     /// Ctrl+D：复制当前行到下一行
@@ -1049,14 +1214,20 @@ impl App {
         }
         let mut files = 0usize;
         let mut dirs = 0usize;
+        let mut skipped: Vec<String> = Vec::new();
         for f in &dropped {
             let p = f.path().to_path_buf();
             if p.is_dir() {
                 self.open_workspace(p.clone());
                 dirs += 1;
             } else if p.is_file() {
-                self.open_path(p.clone());
-                files += 1;
+                let ext = files::ext_of(&p);
+                if files::MD_EXTS.contains(&ext.as_str()) {
+                    self.open_path(p.clone());
+                    files += 1;
+                } else {
+                    skipped.push(ext);
+                }
             }
         }
         let mut msg = String::new();
@@ -1068,6 +1239,16 @@ impl App {
                 msg.push_str("、");
             }
             msg.push_str(&format!("{} 个工作区", dirs));
+        }
+        if !skipped.is_empty() {
+            if !msg.is_empty() {
+                msg.push_str("；");
+            }
+            msg.push_str(&format!(
+                "{} 个不支持的文件（{}）",
+                skipped.len(),
+                skipped.join(", ")
+            ));
         }
         if !msg.is_empty() {
             self.toast(msg, now);
@@ -1239,6 +1420,13 @@ impl App {
         self.handle_drops(ui.ctx(), now);
         self.handle_wheel_zoom(ui.ctx());
         self.check_external_change(now);
+        // 失焦自动保存（autosave 开启时）
+        if !ui.ctx().input(|i| i.viewport().focused.unwrap_or(true))
+            && self.store.settings.autosave
+            && self.tab().map(|t| t.dirty).unwrap_or(false)
+        {
+            self.save_active(now);
+        }
         self.parse_pending(now);
 
         // 更新检查：轮询后台结果
@@ -1451,6 +1639,12 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // 防丢内容：退出时保存所有未保存标签
+        for t in &self.tabs {
+            if t.dirty {
+                let _ = files::write_doc(&t.path, &t.text, t.crlf);
+            }
+        }
         self.persist();
     }
 }

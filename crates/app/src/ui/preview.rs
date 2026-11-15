@@ -559,7 +559,11 @@ fn inline(
                 .find(|l| idx >= l.start && idx < l.end)
                 .map(|l| l.url.clone())
         };
-        if resp.clicked() {
+        // 外链需要 Ctrl/中键点击（防误触），本地文档跳转单击即可
+        let want_open =
+            resp.clicked_by(egui::PointerButton::Middle)
+                || (resp.clicked() && ui.ctx().input(|i| i.modifiers.ctrl));
+        if want_open {
             if let Some(pos) = resp.interact_pointer_pos() {
                 if let Some(url) = hit(pos) {
                     cx.acts.push(Action::Link(url));

@@ -55,3 +55,35 @@ pub fn apply(frame: &eframe::Frame, dark: bool) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn apply(_frame: &eframe::Frame, _dark: bool) {}
+
+
+/// 本地时间 "YYYY-MM-DD HH:MM"（Ctrl+T 插入时间戳用）
+#[repr(C)]
+struct SYSTEMTIME {
+    year: u16,
+    month: u16,
+    day_of_week: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    millis: u16,
+}
+
+pub fn local_time_str() -> String {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLocalTime(t: *mut SYSTEMTIME);
+    }
+    unsafe {
+        let mut st = SYSTEMTIME {
+            year: 0, month: 0, day_of_week: 0, day: 0,
+            hour: 0, minute: 0, second: 0, millis: 0,
+        };
+        GetLocalTime(&mut st);
+        format!(
+            "{}-{:02}-{:02} {:02}:{:02}",
+            st.year, st.month, st.day, st.hour, st.minute
+        )
+    }
+}
