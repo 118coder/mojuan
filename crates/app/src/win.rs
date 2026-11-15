@@ -89,6 +89,60 @@ pub fn local_time_str() -> String {
 }
 
 
+/// exe 自身的构建时刻（文件最后写入时间 → 本地 "MM-dd HH:mm"）。
+/// 窗口标题显示它，用于肉眼区分新旧 exe（右键彻查经验）。
+pub fn exe_build_time_str() -> Option<String> {
+    #[repr(C)]
+    struct FileTime(u64);
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *const u8,
+            disposition: u32,
+            flags: u32,
+            template: isize,
+        ) -> isize;
+        fn CloseHandle(h: isize) -> i32;
+        fn GetFileTime(h: isize, created: *mut u64, accessed: *mut u64, written: *mut FileTime) -> i32;
+        fn FileTimeToSystemTime(ft: *const FileTime, st: *mut SYSTEMTIME) -> i32;
+        fn SystemTimeToTzSpecificLocalTime(tz: *const u8, utc: *const SYSTEMTIME, local: *mut SYSTEMTIME) -> i32;
+    }
+    let exe = std::env::current_exe().ok()?;
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
+    unsafe {
+        // GENERIC_READ(0x80000000) FILE_SHARE_READ|WRITE|DELETE(7) OPEN_EXISTING(3)
+        let h = CreateFileW(wide.as_ptr(), 0x8000_0000, 7, std::ptr::null(), 3, 0, 0);
+        if h == -1 {
+            return None;
+        }
+        let mut ft = FileTime(0);
+        let ok = GetFileTime(h, std::ptr::null_mut(), std::ptr::null_mut(), &mut ft);
+        CloseHandle(h);
+        if ok == 0 {
+            return None;
+        }
+        let mut utc = SYSTEMTIME {
+            year: 0, month: 0, day_of_week: 0, day: 0,
+            hour: 0, minute: 0, second: 0, millis: 0,
+        };
+        if FileTimeToSystemTime(&ft, &mut utc) == 0 {
+            return None;
+        }
+        let mut local = SYSTEMTIME {
+            year: 0, month: 0, day_of_week: 0, day: 0,
+            hour: 0, minute: 0, second: 0, millis: 0,
+        };
+        if SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0 {
+            local = utc;
+        }
+        Some(format!("{:02}-{:02} {:02}:{:02}", local.month, local.day, local.hour, local.minute))
+    }
+}
+
 /// UTF-8 → GBK 字节（ANSI 另存用）。含无法映射字符时返回 None。
 pub fn utf8_to_gbk(s: &str) -> Option<Vec<u8>> {
     #[link(name = "kernel32")]

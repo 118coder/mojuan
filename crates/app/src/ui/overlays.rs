@@ -497,6 +497,15 @@ impl App {
             .fixed_pos(pos)
             .show(ctx, |ui| {
                 widgets::menu_frame(&pal).show(ui, |ui| {
+                    // 无头自测标记控件：selftest.rs 用 read_response 断言菜单真实渲染
+                    let _ = ui.interact(
+                        egui::Rect::from_min_size(
+                            ui.min_rect().min,
+                            egui::Vec2::splat(2.0),
+                        ),
+                        egui::Id::unique(crate::selftest::MENU_MARKER),
+                        egui::Sense::hover(),
+                    );
                     ui.set_width(200.0);
                     if is_editor {
                         // 编辑区菜单（大文档窗口不支持剪切/粘贴/全选——它们作用于窗口文本）
@@ -610,7 +619,9 @@ impl App {
                     }
                 });
             });
-        if ctx.input(|i| i.pointer.any_click()) && !ctx.is_pointer_over_egui() {
+        let over = ctx.is_pointer_over_egui();
+        let any_click = ctx.input(|i| i.pointer.any_click());
+        if any_click && !over {
             self.content_menu = None;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

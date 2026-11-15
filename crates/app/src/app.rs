@@ -250,7 +250,12 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        crate::fonts::install(&cc.egui_ctx);
+        Self::init_with(&cc.egui_ctx)
+    }
+
+    /// 用任意 Context 初始化（无头自测模式复用：不开 eframe 也能构造 App）
+    pub fn init_with(ctx: &egui::Context) -> Self {
+        crate::fonts::install(ctx);
         let mut store = Store::load();
         // 主题跟随系统明暗（Win11 深色模式）
         if store.settings.theme_auto {
@@ -261,8 +266,8 @@ impl App {
             };
         }
         let pal = Palette::new(store.settings.theme);
-        pal.apply(&cc.egui_ctx);
-        cc.egui_ctx.set_theme(match store.settings.theme {
+        pal.apply(ctx);
+        ctx.set_theme(match store.settings.theme {
             Theme::Dark => egui::ThemePreference::Dark,
             Theme::Light => egui::ThemePreference::Light,
         });
@@ -317,8 +322,8 @@ impl App {
         // 恢复上次窗口位置与尺寸（多显示器离屏兜底）
         if let Some([x, y, w, h]) = app.store.settings.window {
             if x > -2000.0 && y > -2000.0 && x < 20000.0 && y < 20000.0 && w > 220.0 && h > 200.0 {
-                cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(x, y)));
-                cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(w, h)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(x, y)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(w, h)));
             }
         }
         // 恢复上次的工作区 / 文件
@@ -530,11 +535,13 @@ impl App {
         if self.viewer.is_some() {
             return;
         }
-        let (sec, pos) = ctx.input(|i| (i.pointer.secondary_clicked(), i.pointer.interact_pos()));
+        let sec = ctx.input(|i| i.pointer.secondary_clicked());
         if !sec {
             return;
         }
-        let Some(pos) = pos else { return };
+        let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) else {
+            return;
+        };
         if !central.contains(pos) {
             return;
         }
@@ -1829,6 +1836,11 @@ impl App {
 
         self.ui_overlays(&ctx, now);
         self.draw_drag_overlay(&ctx, now);
+        // 完整界面分支也要渲染右键菜单（曾经漏掉：状态置位了但没人画，
+        // 表现为完整模式下右键没有任何反应；极简分支一直有渲染调用）
+        if self.content_menu.is_some() {
+            self.ui_content_menu(&ctx, now);
+        }
     }
 }
 

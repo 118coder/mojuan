@@ -9,6 +9,7 @@ mod export;
 mod fonts;
 mod img;
 mod icons;
+mod selftest;
 mod theme;
 mod ui;
 mod update;
@@ -19,6 +20,11 @@ use mojuan_core::ViewMode;
 use std::path::PathBuf;
 
 fn main() -> eframe::Result<()> {
+    // 无头自测模式：不开窗口跑真实布局代码，验证右键菜单等交互，exit code 表示结果
+    if std::env::args().nth(1).as_deref() == Some("--selftest") {
+        let code = selftest::run_full_selftest();
+        std::process::exit(code);
+    }
     // 更新替换后，清掉上次留下的旧版本
     update::cleanup_old_exe();
     // 命令行打开文件：双击 .md 关联 / 手动传参（忽略 - 开头的选项）
@@ -31,7 +37,11 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1340.0, 880.0])
             .with_min_inner_size([960.0, 620.0])
-            .with_title("墨卷 · Mojuan")
+            .with_title(format!(
+            "墨卷 v{} · 构建于 {}",
+            mojuan_core::VERSION,
+            crate::win::exe_build_time_str().unwrap_or_else(|| "未知".into())
+        ))
             .with_icon(std::sync::Arc::new(art::app_icon())),
         ..Default::default()
     };
