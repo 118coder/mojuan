@@ -36,6 +36,7 @@ fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1340.0, 880.0])
+            .with_decorations(false)
             .with_min_inner_size([960.0, 620.0])
             .with_title(format!(
             "墨卷 v{} · 构建于 {}",

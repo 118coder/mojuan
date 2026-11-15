@@ -19,6 +19,9 @@ mod imp {
 
     const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    /// DWMWA_COLOR_NONE：不画描边
+    const DWMWA_COLOR_NONE: u32 = 0xFF_FF_FF_FE;
 
     pub fn set_dark_titlebar(hwnd: isize, dark: bool) {
         let v: i32 = if dark { 1 } else { 0 };
@@ -41,6 +44,36 @@ mod imp {
             );
         }
     }
+
+    /// COLORREF = 0x00BBGGRR
+    pub fn set_border(hwnd: isize, dark: bool, fullscreen: bool) {
+        let color: i32 = if fullscreen {
+            DWMWA_COLOR_NONE as i32
+        } else if dark {
+            // #2C2C2C
+            0x00_2C_2C_2C_u32 as i32
+        } else {
+            // #E1E4E8 → BB=0xE8 GG=0xE4 RR=0xE1
+            0x00_E8_E4_E1_u32 as i32
+        };
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                &color as *const i32 as *const c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+
+    /// 主屏物理像素尺寸（离屏测试窗口定位用）
+    pub fn screen_size_px() -> (i32, i32) {
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetSystemMetrics(i: i32) -> i32;
+        }
+        unsafe { (GetSystemMetrics(0), GetSystemMetrics(1)) }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -55,6 +88,32 @@ pub fn apply(frame: &eframe::Frame, dark: bool) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn apply(_frame: &eframe::Frame, _dark: bool) {}
+
+/// 无边框窗口的观感：DWM 描边（主题色，全屏时关闭）+ 圆角。
+/// 无边框窗口没有系统阴影，用 1px 描边把窗口从桌面上衬出来。
+#[cfg(target_os = "windows")]
+pub fn set_chrome(frame: &eframe::Frame, dark: bool, fullscreen: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(handle) = frame.window_handle() {
+        if let RawWindowHandle::Win32(w) = handle.as_raw() {
+            imp::set_border(w.hwnd.get(), dark, fullscreen);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_chrome(_frame: &eframe::Frame, _dark: bool, _fullscreen: bool) {}
+
+/// 主屏物理像素尺寸（离屏测试窗口定位用）
+#[cfg(target_os = "windows")]
+pub fn screen_size_px() -> (i32, i32) {
+    imp::screen_size_px()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn screen_size_px() -> (i32, i32) {
+    (1920, 1080)
+}
 
 
 /// 本地时间 "YYYY-MM-DD HH:MM"（Ctrl+T 插入时间戳用）

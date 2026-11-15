@@ -15,6 +15,8 @@ impl App {
     /// 极简模式顶条：文件名 + 展开完整界面
     pub(crate) fn ui_minimal_bar(&mut self, ui: &mut Ui, now: f64) {
         let pal = self.pal.clone();
+        // 无边框窗口：极简条 = 标题栏拖拽区
+        crate::ui::titlebar::drag_region(self, ui, "min");
         ui.horizontal_centered(|ui| {
             ui.set_min_height(34.0);
             ui.add_space(2.0);
@@ -32,6 +34,8 @@ impl App {
                 },
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // 窗口三键在最右
+                crate::ui::titlebar::window_buttons(self, ui, &pal);
                 if ui
                     .add(
                         egui::Button::new(

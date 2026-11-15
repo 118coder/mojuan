@@ -219,7 +219,6 @@ pub struct App {
     pub palette_files: Vec<(PathBuf, String)>,
     pub pending_theme: Option<Theme>,
     pub now: f64,
-    pub titlebar_theme: Option<Theme>,
     pub dev_scroll: Option<f32>,
     pub images: crate::img::Loader,
     pub updater: crate::update::Updater,
@@ -246,6 +245,14 @@ pub struct App {
     pub find: Option<FindState>,
     /// 内容区右键菜单（是否编辑区 + 弹出位置）
     pub content_menu: Option<(bool, Pos2)>,
+    /// 右键菜单本帧的屏幕矩形（判断「点击是否落在菜单上」——
+    /// 不能用 is_pointer_over_egui：墨卷整个窗口都是 egui，它恒为真，
+    /// 曾导致菜单永远点不掉）
+    pub content_menu_rect: Option<Rect>,
+    /// 无边框标题栏：系统模态拖拽已启动（防重复触发 StartDrag）
+    pub titlebar_drag: bool,
+    /// 无边框窗口 chrome 状态（主题 + 全屏），变化时才重设 DWM 圆角/描边
+    pub chrome_state: Option<(Theme, bool)>,
 }
 
 impl App {
@@ -301,7 +308,6 @@ impl App {
             palette_files: Vec::new(),
             pending_theme: None,
             now: 0.0,
-            titlebar_theme: None,
             dev_scroll: std::env::var("MJ_SCROLL").ok().and_then(|v| v.parse().ok()),
             images: crate::img::Loader::default(),
             updater: crate::update::Updater::default(),
@@ -317,28 +323,54 @@ impl App {
             viewer_scale: 1.0,
             find: None,
             content_menu: None,
+            content_menu_rect: None,
+            titlebar_drag: false,
+            chrome_state: None,
         };
 
+        // 离屏测试模式（MJ_OFFSCREEN=1）：不还原用户窗口/工作区/文件，
+        // 窗口缩到屏幕右下角，固定完整界面+阅读模式，供系统级真实输入测试
+        let offscreen = std::env::var("MJ_OFFSCREEN").is_ok();
         // 恢复上次窗口位置与尺寸（多显示器离屏兜底）
-        if let Some([x, y, w, h]) = app.store.settings.window {
-            if x > -2000.0 && y > -2000.0 && x < 20000.0 && y < 20000.0 && w > 220.0 && h > 200.0 {
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(x, y)));
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(w, h)));
+        if !offscreen {
+            if let Some([x, y, w, h]) = app.store.settings.window {
+                if x > -2000.0 && y > -2000.0 && x < 20000.0 && y < 20000.0 && w > 220.0 && h > 200.0 {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(x, y)));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(w, h)));
+                }
             }
         }
         // 恢复上次的工作区 / 文件
-        if let Some(ws) = app.store.settings.last_workspace.clone() {
-            let p = PathBuf::from(&ws);
-            if p.is_dir() {
-                app.open_workspace(p);
+        if !offscreen {
+            if let Some(ws) = app.store.settings.last_workspace.clone() {
+                let p = PathBuf::from(&ws);
+                if p.is_dir() {
+                    app.open_workspace(p);
+                }
+            }
+            if let Some(f) = app.store.settings.last_file.clone() {
+                let p = PathBuf::from(&f);
+                if p.is_file() {
+                    app.open_path(p);
+                    app.restore_last_scroll();
+                }
             }
         }
-        if let Some(f) = app.store.settings.last_file.clone() {
-            let p = PathBuf::from(&f);
-            if p.is_file() {
-                app.open_path(p);
-                app.restore_last_scroll();
-            }
+        if offscreen {
+            app.minimal = false;
+            app.fullscreen = false;
+            app.store.settings.sidebar_open = false;
+            app.store.settings.mode = ViewMode::Read;
+            app.store.settings.check_updates = false;
+            app.store.settings.autosave = false;
+            app.updater.auto_done = true;
+            let (sw, sh) = crate::win::screen_size_px();
+            let ppp = ctx.pixels_per_point();
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(
+                (sw as f32 - 345.0 * ppp) / ppp,
+                (sh as f32 - 270.0 * ppp) / ppp,
+            )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(320.0, 220.0)));
         }
         // 开发期快捷入口：MJ_UI=outline|search|recent|palette|about|settings|read|edit
         if let Ok(ui) = std::env::var("MJ_UI") {
@@ -536,6 +568,14 @@ impl App {
             return;
         }
         let sec = ctx.input(|i| i.pointer.secondary_clicked());
+        let menu_dbg = std::env::var("MJ_MENU_LOG").is_ok();
+        if menu_dbg && sec {
+            crate::app::dbg_log(&format!(
+                "[MENU] sec_clicked pos={:?} central={:?}",
+                ctx.input(|i| i.pointer.interact_pos()),
+                central
+            ));
+        }
         if !sec {
             return;
         }
@@ -543,11 +583,19 @@ impl App {
             return;
         };
         if !central.contains(pos) {
+            if menu_dbg { crate::app::dbg_log(&format!("[MENU] REJECT outside-central pos={pos:?}")); }
             return;
         }
         // 顶部标签条区域不触发
         if pos.y < central.min.y + 44.0 {
+            if menu_dbg { crate::app::dbg_log(&format!("[MENU] REJECT tab-strip pos={pos:?}")); }
             return;
+        }
+        if menu_dbg {
+            crate::app::dbg_log(&format!(
+                "[MENU] OPEN editor={} pos={pos:?}",
+                matches!(self.store.settings.mode, ViewMode::Edit)
+            ));
         }
         let is_editor = match self.store.settings.mode {
             ViewMode::Edit => true,
@@ -558,6 +606,75 @@ impl App {
             }
         };
         self.content_menu = Some((is_editor, pos));
+    }
+
+    /// 无边框窗口：窗口边缘热区 → 系统模态缩放（BeginResize）。
+    /// 只做几何判断 + 光标，不创建 interact，不拦截任何下层交互。
+    fn handle_edge_resize(&mut self, ctx: &Context) {
+        if self.fullscreen {
+            return;
+        }
+        let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        if maxed {
+            return;
+        }
+        let (rect, pos, pressed) = ctx.input(|i| {
+            (
+                i.viewport().inner_rect.unwrap_or(egui::Rect::NOTHING),
+                i.pointer.interact_pos(),
+                i.pointer.primary_pressed(),
+            )
+        });
+        let Some(p) = pos else { return };
+        if !rect.is_positive() {
+            return;
+        }
+        const M: f32 = 5.0; // 边缘热区宽度
+        // 顶部条高度：右上角是窗口三键，热区让位（右缘只在标题栏以下生效）
+        let top_h = if self.minimal { 34.0 } else { 44.0 };
+        let at_l = p.x - rect.min.x <= M;
+        let at_r = rect.max.x - p.x <= M && p.y >= rect.min.y + top_h;
+        let at_t = p.y - rect.min.y <= M && p.x <= rect.max.x - 148.0;
+        let at_b = rect.max.y - p.y <= M;
+        use egui::ResizeDirection as RD;
+        let dir = match (at_l, at_r, at_t, at_b) {
+            (true, false, true, false) => RD::NorthWest,
+            (false, true, true, false) => RD::NorthEast,
+            (true, false, false, true) => RD::SouthWest,
+            (false, true, false, true) => RD::SouthEast,
+            (true, false, false, false) => RD::West,
+            (false, true, false, false) => RD::East,
+            (false, false, true, false) => RD::North,
+            (false, false, false, true) => RD::South,
+            _ => return,
+        };
+        let icon = match dir {
+            RD::North | RD::South => egui::CursorIcon::ResizeVertical,
+            RD::East | RD::West => egui::CursorIcon::ResizeHorizontal,
+            RD::NorthEast | RD::SouthWest => egui::CursorIcon::ResizeNeSw,
+            RD::NorthWest | RD::SouthEast => egui::CursorIcon::ResizeNwSe,
+        };
+        ctx.set_cursor_icon(icon);
+        if pressed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+        }
+    }
+
+    /// 标题栏拖拽区/双击最大化（无边框窗口共用：完整模式顶栏 + 极简条）。
+    /// 拖动超过阈值才发 StartDrag（按下即发会吃掉双击）。
+    pub(crate) fn titlebar_track_drag(&mut self, ctx: &Context, resp: &egui::Response) {
+        if resp.dragged() {
+            if !self.titlebar_drag && resp.drag_delta().length() > 3.0 {
+                self.titlebar_drag = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+        } else {
+            self.titlebar_drag = false;
+        }
+        if resp.double_clicked() {
+            let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed));
+        }
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
@@ -1713,6 +1830,19 @@ impl App {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         self.now = now;
+        if std::env::var("MJ_EV_LOG").is_ok() {
+            let evs: Vec<String> = ctx.input(|i| {
+                i.raw
+                    .events
+                    .iter()
+                    .take(8)
+                    .map(|e| format!("{e:?}"))
+                    .collect()
+            });
+            if !evs.is_empty() {
+                crate::app::dbg_log(&format!("[EV] {}", evs.join(" | ")));
+            }
+        }
 
         self.handle_shortcuts(&ctx, now);
         self.handle_drops(ui.ctx(), now);
@@ -1844,6 +1974,18 @@ impl App {
     }
 }
 
+/// 调试日志（临时埋点，[MENU]/[EV] 标签）：GUI 子系统下 eprintln 落不到
+/// 重定向句柄，写文件最可靠（MJ_LOG_FILE=路径）
+pub(crate) fn dbg_log(msg: &str) {
+    eprintln!("{msg}");
+    if let Ok(path) = std::env::var("MJ_LOG_FILE") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
 fn collect_rows(ws: &mut Workspace, dir: &Path, depth: usize, out: &mut Vec<Row>) {
     if depth > 8 {
         return;
@@ -1935,14 +2077,19 @@ impl eframe::App for App {
                 self.win_rect = Some([outer.min.x, outer.min.y, r.width(), r.height()]);
             }
         }
-        if self.titlebar_theme != Some(self.store.settings.theme) {
+        let chrome_key = (self.store.settings.theme, self.fullscreen);
+        if self.chrome_state != Some(chrome_key) {
             crate::win::apply(frame, self.pal.dark);
-            self.titlebar_theme = Some(self.store.settings.theme);
+            // 无边框窗口：DWM 圆角 + 主题色描边（全屏时描边去掉）
+            crate::win::set_chrome(frame, self.pal.dark, self.fullscreen);
+            self.chrome_state = Some(chrome_key);
         }
         crate::devshot::tick(ui.ctx());
         // 让窗口底色与面板一致
         ui.painter().rect_filled(ui.max_rect(), 0, self.pal.bg);
         self.layout(ui);
+        // 无边框窗口的边缘缩放热区（放最外层，几何判断不拦事件）
+        self.handle_edge_resize(ui.ctx());
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {

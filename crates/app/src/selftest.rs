@@ -1,7 +1,7 @@
 //! 无头自测模式：`mojuan.exe --selftest`
 //!
 //! 不开窗口、不进主循环：直接用纯 `egui::Context` 驱动 App 真实布局代码，
-//! 按帧注入指针/键盘事件，断言交互的「状态 + 真实渲染」。
+//! 按帧注入指针/键盘事件，断言交互的「状态 + 真实渲染 + 发出的窗口命令」。
 //!
 //! 为什么强调「真实渲染」：曾经出过状态已设置但菜单没人画出来的 bug
 //! （完整界面分支漏调 ui_content_menu），只断言内部状态发现不了它。
@@ -12,8 +12,8 @@
 
 use crate::app::App;
 use egui::{
-    Context, Event, Id, Key, Modifiers, PointerButton, Pos2, Rect, RawInput, ViewportId,
-    ViewportInfo, Vec2,
+    Context, Event, Id, Key, Modifiers, MouseWheelSource, MouseWheelUnit, PointerButton, Pos2,
+    Rect, RawInput, TouchPhase, ViewportCommand, ViewportId, ViewportInfo, Vec2,
 };
 use mojuan_core::ViewMode;
 
@@ -23,6 +23,10 @@ pub const MENU_MARKER: &str = "mojuan-menu-marker";
 const WIN: Vec2 = Vec2::new(1000.0, 800.0);
 /// 右键注入点：窗口中部，肯定落在中央内容区（避开顶部 44px 标签条）
 const CLICK: Pos2 = Pos2::new(500.0, 400.0);
+/// 菜单外点击点（菜单宽 200 起点 500 → 300 在菜单左侧外）
+const OUTSIDE: Pos2 = Pos2::new(300.0, 700.0);
+/// 完整模式顶栏空白区（按钮都不在这）
+const BAR: Pos2 = Pos2::new(600.0, 22.0);
 
 const DT: f64 = 1.0 / 30.0;
 
@@ -46,13 +50,17 @@ fn frame_input(events: Vec<Event>, t: f64) -> RawInput {
     raw
 }
 
-fn pointer(button: PointerButton, pressed: bool) -> Event {
+fn pointer(button: PointerButton, pressed: bool, pos: Pos2) -> Event {
     Event::PointerButton {
-        pos: CLICK,
+        pos,
         button,
         pressed,
         modifiers: Modifiers::default(),
     }
+}
+
+fn move_to(pos: Pos2) -> Event {
+    Event::PointerMoved(pos)
 }
 
 fn esc(pressed: bool) -> Event {
@@ -61,6 +69,16 @@ fn esc(pressed: bool) -> Event {
         physical_key: Some(Key::Escape),
         pressed,
         repeat: false,
+        modifiers: Modifiers::default(),
+    }
+}
+
+fn wheel(y: f32) -> Event {
+    Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: Vec2::new(0.0, y),
+        phase: TouchPhase::Move,
+        source: MouseWheelSource::Wheel,
         modifiers: Modifiers::default(),
     }
 }
@@ -101,32 +119,55 @@ pub fn run_full_selftest() -> i32 {
         }
     };
 
-    // 跑一帧；events 在本帧开头被处理
+    // 跑一帧；events 在本帧开头被处理；返回本帧发出的窗口命令（debug 串）
     let mut t = 0.0f64;
-    let mut frame = |app: &mut App, events: Vec<Event>, t: f64| {
-        let _ = ctx.run_pass(frame_input(events, t), |ctx| {
+    let mut frame = |app: &mut App, events: Vec<Event>, t: f64| -> Vec<String> {
+        let out = ctx.run_pass(frame_input(events, t), |ctx| {
             ctx.root_ui(|ui| {
                 ui.painter().rect_filled(ui.max_rect(), 0, app.pal.bg);
                 app.layout(ui);
             });
         });
+        let _ = ctx.read_response(Id::unique(MENU_MARKER));
+        out.viewport_output
+            .values()
+            .flat_map(|v| v.commands.iter().map(|c| format!("{c:?}")))
+            .collect()
     };
 
-    for f in 0..40i32 {
+    for f in 0..60i32 {
         let events = match f {
             // egui 级右键注入（模拟 winit 上交的事件）：按下 → 释放
-            16 => vec![pointer(PointerButton::Secondary, true)],
-            17 => vec![pointer(PointerButton::Secondary, false)],
+            16 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            17 => vec![pointer(PointerButton::Secondary, false, CLICK)],
             18 => vec![esc(true)],
             19 => vec![esc(false)],
+            // 再开一次，测「点菜单外关闭」
+            22 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            23 => vec![pointer(PointerButton::Secondary, false, CLICK)],
+            25 => vec![pointer(PointerButton::Primary, true, OUTSIDE)],
+            26 => vec![pointer(PointerButton::Primary, false, OUTSIDE)],
+            // 再开一次，测「滚轮关闭」
+            28 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            29 => vec![pointer(PointerButton::Secondary, false, CLICK)],
+            30 => vec![wheel(-50.0)],
+            // 标题栏拖拽（无边框窗口）：按下 → 移动 → 释放
+            34 => vec![pointer(PointerButton::Primary, true, BAR)],
+            35 => vec![move_to(Pos2::new(BAR.x + 24.0, BAR.y))],
+            36 => vec![pointer(PointerButton::Primary, false, Pos2::new(BAR.x + 24.0, BAR.y))],
+            // 标题栏双击 → 最大化
+            38 => vec![pointer(PointerButton::Primary, true, BAR)],
+            39 => vec![pointer(PointerButton::Primary, false, BAR)],
+            40 => vec![pointer(PointerButton::Primary, true, BAR)],
+            41 => vec![pointer(PointerButton::Primary, false, BAR)],
             // 极简模式：右键 + Esc
-            26 => vec![pointer(PointerButton::Secondary, true)],
-            27 => vec![pointer(PointerButton::Secondary, false)],
-            28 => vec![esc(true)],
-            29 => vec![esc(false)],
+            46 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            47 => vec![pointer(PointerButton::Secondary, false, CLICK)],
+            48 => vec![esc(true)],
+            49 => vec![esc(false)],
             _ => Vec::new(),
         };
-        frame(&mut app, events, t);
+        let cmds = frame(&mut app, events, t);
         t += DT;
 
         match f {
@@ -136,7 +177,6 @@ pub fn run_full_selftest() -> i32 {
                 app.tab().map(|tab| tab.path == fixture).unwrap_or(false),
                 &format!("tabs={}", app.tabs.len()),
             ),
-            // 右键已在 16/17 帧注入，18 帧断言（此时 Esc 尚未处理完也行，先断状态）
             17 => {
                 let opened = app.content_menu.is_some();
                 let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
@@ -146,7 +186,6 @@ pub fn run_full_selftest() -> i32 {
                     opened,
                     &format!("content_menu.is_some()={opened}"),
                 );
-                // 关键断言：菜单控件真实出现在了控件树里
                 check(
                     &mut failures,
                     "完整界面·菜单真实渲染",
@@ -162,12 +201,51 @@ pub fn run_full_selftest() -> i32 {
                 app.content_menu.is_none(),
                 &format!("content_menu.is_some()={}", app.content_menu.is_some()),
             ),
-            24 => {
-                // 切极简模式（回归验证：极简分支一直有渲染调用）
-                app.minimal = true;
+            24 => check(
+                &mut failures,
+                "完整界面·菜单再次打开",
+                app.content_menu.is_some(),
+                &format!("content_menu.is_some()={}", app.content_menu.is_some()),
+            ),
+            26 => check(
+                &mut failures,
+                "完整界面·点菜单外关闭",
+                app.content_menu.is_none(),
+                &format!("content_menu.is_some()={}（用户报告：菜单一直停留）", app.content_menu.is_some()),
+            ),
+            29 => check(
+                &mut failures,
+                "完整界面·滚轮前打开",
+                app.content_menu.is_some(),
+                &format!("content_menu.is_some()={}", app.content_menu.is_some()),
+            ),
+            31 => check(
+                &mut failures,
+                "完整界面·滚轮关闭",
+                app.content_menu.is_none(),
+                &format!("content_menu.is_some()={}", app.content_menu.is_some()),
+            ),
+            35 => {
+                let hit = cmds.iter().any(|c| c.starts_with("StartDrag"));
+                check(
+                    &mut failures,
+                    "无边框·标题栏拖拽发 StartDrag",
+                    hit,
+                    &format!("cmds={cmds:?}"),
+                );
             }
-            // 极简模式右键：26 按下 27 释放
-            27 => {
+            41 => {
+                let hit = cmds
+                    .iter()
+                    .any(|c| c.starts_with("Maximized(true)") || c.contains("Maximized(true)"));
+                check(
+                    &mut failures,
+                    "无边框·双击标题栏最大化",
+                    hit,
+                    &format!("cmds={cmds:?}"),
+                );
+            }
+            47 => {
                 let opened = app.content_menu.is_some();
                 let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
                 check(
@@ -187,7 +265,7 @@ pub fn run_full_selftest() -> i32 {
         }
     }
 
-    // Esc 关闭极简菜单（28/29 帧已注入）
+    // Esc 关闭极简菜单（48/49 帧已注入）
     check(
         &mut failures,
         "极简模式·Esc 关闭",

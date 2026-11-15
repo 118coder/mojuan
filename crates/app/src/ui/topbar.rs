@@ -16,6 +16,8 @@ impl App {
         let pal = self.pal.clone();
         let h = ui.available_height();
         let mut more_rect: Option<egui::Rect> = None;
+        // 无边框窗口：整条顶栏 = 标题栏拖拽区（先注册 = 底层，按钮在其上优先响应）
+        crate::ui::titlebar::drag_region(self, ui, "top");
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
 
@@ -61,6 +63,8 @@ impl App {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // 窗口三键在最右（Win11 记事本样式）
+                crate::ui::titlebar::window_buttons(self, ui, &pal);
                 let more = widgets::icon_button(ui, &pal, Icon::More, self.more_menu, "更多");
                 more_rect = Some(more.rect);
                 if more.clicked() {

@@ -8,6 +8,7 @@ pub mod overlays;
 pub mod preview;
 pub mod sidebar;
 pub mod statusbar;
+pub mod titlebar;
 pub mod topbar;
 pub mod update_ui;
 pub mod vpreview;

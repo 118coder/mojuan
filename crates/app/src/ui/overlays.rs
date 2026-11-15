@@ -484,7 +484,11 @@ impl App {
 
     /// 内容区右键菜单（阅读 / 编辑两种）
     pub(crate) fn ui_content_menu(&mut self, ctx: &egui::Context, now: f64) {
-        let Some((is_editor, pos)) = self.content_menu else { return };
+        let mut frame_resp: Option<egui::InnerResponse<()>> = None;
+        let Some((is_editor, pos)) = self.content_menu else {
+            self.content_menu_rect = None;
+            return;
+        };
         let pal = self.pal.clone();
         let mut action: Option<u8> = None;
         let mut export: Option<u8> = None;
@@ -496,7 +500,7 @@ impl App {
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .show(ctx, |ui| {
-                widgets::menu_frame(&pal).show(ui, |ui| {
+                let fr = widgets::menu_frame(&pal).show(ui, |ui| {
                     // 无头自测标记控件：selftest.rs 用 read_response 断言菜单真实渲染
                     let _ = ui.interact(
                         egui::Rect::from_min_size(
@@ -618,13 +622,40 @@ impl App {
                         }
                     }
                 });
+                frame_resp = Some(fr);
             });
-        let over = ctx.is_pointer_over_egui();
+        // 记下菜单矩形：判断「点击是否落在菜单上」用
+        // （不能用 is_pointer_over_egui：整个窗口都是 egui，恒为真，
+        //   曾导致点菜单外关不掉、菜单一直停留）
+        if let Some(fr) = frame_resp {
+            self.content_menu_rect = Some(fr.response.rect);
+        }
+        let pointer = ctx.input(|i| i.pointer.interact_pos());
         let any_click = ctx.input(|i| i.pointer.any_click());
-        if any_click && !over {
+        let inside_menu = match (self.content_menu_rect, pointer) {
+            (Some(r), Some(p)) => r.contains(p),
+            _ => false,
+        };
+        if any_click && !inside_menu {
+            if std::env::var("MJ_MENU_LOG").is_ok() {
+                crate::app::dbg_log(&format!(
+                    "[MENU] close click-outside pointer={pointer:?} rect={:?}",
+                    self.content_menu_rect
+                ));
+            }
+            self.content_menu = None;
+        }
+        // 滚轮滚动时关闭（Win11 行为）
+        if ctx.input(|i| i.smooth_scroll_delta.y.abs() > 0.0) {
+            if std::env::var("MJ_MENU_LOG").is_ok() {
+                crate::app::dbg_log("[MENU] close wheel");
+            }
             self.content_menu = None;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if std::env::var("MJ_MENU_LOG").is_ok() {
+                crate::app::dbg_log("[MENU] close esc");
+            }
             self.content_menu = None;
         }
         if let Some(a) = action {
