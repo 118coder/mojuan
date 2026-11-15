@@ -482,6 +482,176 @@ impl App {
         }
     }
 
+    /// 内容区右键菜单（阅读 / 编辑两种）
+    pub(crate) fn ui_content_menu(&mut self, ctx: &egui::Context, now: f64) {
+        let Some((is_editor, pos)) = self.content_menu else { return };
+        let pal = self.pal.clone();
+        let mut action: Option<u8> = None;
+        let mut export: Option<u8> = None;
+        let big = self
+            .tab()
+            .map(|t| t.text.len() > crate::ui::vpreview::VIRTUAL_THRESHOLD)
+            .unwrap_or(false);
+        egui::Area::new(egui::Id::unique("content-menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                widgets::menu_frame(&pal).show(ui, |ui| {
+                    ui.set_width(200.0);
+                    if is_editor {
+                        // 编辑区菜单（大文档窗口不支持剪切/粘贴/全选——它们作用于窗口文本）
+                        if !big {
+                            if widgets::menu_item(ui, &pal, Icon::Copy, "剪切  Ctrl+X", false)
+                                .clicked()
+                            {
+                                action = Some(1);
+                            }
+                            if widgets::menu_item(ui, &pal, Icon::Copy, "复制  Ctrl+C", false)
+                                .clicked()
+                            {
+                                action = Some(2);
+                            }
+                            if widgets::menu_item(ui, &pal, Icon::FileText, "粘贴  Ctrl+V", false)
+                                .clicked()
+                            {
+                                action = Some(3);
+                            }
+                            if widgets::menu_item(ui, &pal, Icon::Outline, "全选  Ctrl+A", false)
+                                .clicked()
+                            {
+                                action = Some(4);
+                            }
+                            widgets::hairline(ui, &pal);
+                        } else {
+                            ui.label(
+                                RichText::new("超大文档：请在窗口内选择后用 Ctrl+C 复制")
+                                    .size(10.5)
+                                    .color(pal.text_faint),
+                            );
+                            widgets::hairline(ui, &pal);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::Clock, "插入日期时间  F5", false)
+                            .clicked()
+                        {
+                            action = Some(5);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::Search, "在文档中查找  Ctrl+F", false)
+                            .clicked()
+                        {
+                            action = Some(6);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::Outline, "跳转到行  Ctrl+G", false)
+                            .clicked()
+                        {
+                            action = Some(7);
+                        }
+                    } else {
+                        // 阅读区菜单
+                        ui.label(
+                            RichText::new("选中文字后按 Ctrl+C 复制")
+                                .size(10.5)
+                                .color(pal.text_faint),
+                        );
+                        if widgets::menu_item(ui, &pal, Icon::Copy, "复制全文（Markdown）", false)
+                            .clicked()
+                        {
+                            action = Some(8);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::Search, "在文档中查找  Ctrl+F", false)
+                            .clicked()
+                        {
+                            action = Some(6);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::Outline, "跳转到行  Ctrl+G", false)
+                            .clicked()
+                        {
+                            action = Some(7);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::ChevronRight, "回到顶部", false)
+                            .clicked()
+                        {
+                            action = Some(9);
+                        }
+                        widgets::hairline(ui, &pal);
+                        let fav = self
+                            .active_path()
+                            .map(|p| self.store.favorites.contains(&p.to_string_lossy().to_string()))
+                            .unwrap_or(false);
+                        let fav_label = if fav { "取消收藏当前文档" } else { "收藏当前文档" };
+                        if widgets::menu_item(ui, &pal, Icon::Check, fav_label, false).clicked() {
+                            action = Some(10);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::Refresh, "打印…  Ctrl+P", false)
+                            .clicked()
+                        {
+                            action = Some(11);
+                        }
+                        widgets::hairline(ui, &pal);
+                        if widgets::menu_item(ui, &pal, Icon::FileText, "导出为 HTML", false)
+                            .clicked()
+                        {
+                            export = Some(1);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::FileText, "导出为 Word", false)
+                            .clicked()
+                        {
+                            export = Some(2);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::FileText, "导出为 PDF", false)
+                            .clicked()
+                        {
+                            export = Some(3);
+                        }
+                        if widgets::menu_item(ui, &pal, Icon::Image, "导出为长图 PNG", false)
+                            .clicked()
+                        {
+                            export = Some(4);
+                        }
+                    }
+                });
+            });
+        if ctx.input(|i| i.pointer.any_click()) && !ctx.is_pointer_over_egui() {
+            self.content_menu = None;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.content_menu = None;
+        }
+        if let Some(a) = action {
+            self.content_menu = None;
+            match a {
+                1 => self.editor_cut(ctx, now),
+                2 => self.editor_copy_sel(ctx, now),
+                3 => self.editor_paste(ctx, now),
+                4 => self.editor_select_all(ctx),
+                5 => {
+                    let ts = crate::win::local_time_str();
+                    self.editor_insert_text(ctx, now, &ts);
+                }
+                6 => self.find_open(ctx),
+                7 => self.dialog = Some(Dialog::Goto { input: String::new() }),
+                8 => self.copy_all_md(now),
+                9 => {
+                    if let Some(t) = self.tab_mut() {
+                        t.restore_read = Some(0.0);
+                    }
+                }
+                10 => self.toggle_favorite(now),
+                11 => self.print_doc(now),
+                _ => {}
+            }
+        }
+        if let Some(e) = export {
+            self.content_menu = None;
+            match e {
+                1 => self.export_html(now),
+                2 => self.export_docx(now),
+                3 => self.export_pdf(now),
+                4 => self.export_png(now),
+                _ => {}
+            }
+        }
+    }
+
     /// 标签右键菜单：关闭 / 关闭其他 / 关闭右侧
     pub(crate) fn ui_tab_menu(&mut self, ctx: &egui::Context, now: f64) {
         let Some((idx, pos)) = self.tab_menu else { return };

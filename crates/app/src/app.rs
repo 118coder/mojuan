@@ -244,6 +244,8 @@ pub struct App {
     pub viewer_scale: f32,
     /// 文档内查找浮条（Ctrl+F）
     pub find: Option<FindState>,
+    /// 内容区右键菜单（是否编辑区 + 弹出位置）
+    pub content_menu: Option<(bool, Pos2)>,
 }
 
 impl App {
@@ -309,6 +311,7 @@ impl App {
             outline_filter: String::new(),
             viewer_scale: 1.0,
             find: None,
+            content_menu: None,
         };
 
         // 恢复上次窗口位置与尺寸（多显示器离屏兜底）
@@ -520,6 +523,34 @@ impl App {
                 false
             }
         }
+    }
+
+    /// 中央区域右键 → 打开内容菜单（阅读/编辑按模式与位置判定）
+    fn maybe_open_content_menu(&mut self, ctx: &Context, central: Rect, now: f64) {
+        if self.viewer.is_some() || self.content_menu.is_some() {
+            return;
+        }
+        let (sec, pos) = ctx.input(|i| (i.pointer.secondary_clicked(), i.pointer.interact_pos()));
+        if !sec {
+            return;
+        }
+        let Some(pos) = pos else { return };
+        if !central.contains(pos) {
+            return;
+        }
+        // 顶部标签条区域不触发
+        if pos.y < central.min.y + 44.0 {
+            return;
+        }
+        let is_editor = match self.store.settings.mode {
+            ViewMode::Edit => true,
+            ViewMode::Read => false,
+            ViewMode::Split => {
+                let ratio = self.store.settings.split_ratio.clamp(0.25, 0.75);
+                pos.x < central.min.x + central.width() * ratio
+            }
+        };
+        self.content_menu = Some((is_editor, pos));
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
@@ -862,6 +893,7 @@ impl App {
                     self.tab_menu = None;
                     self.viewer = None;
                     self.find = None;
+                    self.content_menu = None;
                 }
                 _ => {}
             }
@@ -888,6 +920,73 @@ impl App {
                 egui::text::CCursor::new(b),
             )));
             st.store(ctx, self.editor_id());
+        }
+    }
+
+    /// 编辑器选区文本（无选区返回空）
+    fn editor_selected_text(&self, ctx: &Context) -> Option<String> {
+        let (a, b) = self.editor_cursor_chars(ctx)?;
+        if a == b {
+            return None;
+        }
+        self.tab().map(|t| {
+            let ba = char_to_byte(&t.text, a);
+            let bb = char_to_byte(&t.text, b);
+            t.text[ba..bb].to_string()
+        })
+    }
+
+    /// 右键「剪切」：复制选区并删除
+    pub fn editor_cut(&mut self, ctx: &Context, now: f64) {
+        let Some((a, b)) = self.editor_cursor_chars(ctx) else { return };
+        if a == b {
+            return;
+        }
+        let text = self.editor_selected_text(ctx).unwrap_or_default();
+        ctx.copy_text(text);
+        let idx = self.active;
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let ba = char_to_byte(&tab.text, a);
+        let bb = char_to_byte(&tab.text, b);
+        tab.text.replace_range(ba..bb, "");
+        self.editor_touch(idx, now);
+        self.editor_store_cursor(ctx, a, a);
+    }
+
+    /// 右键「复制」：复制选区
+    pub fn editor_copy_sel(&mut self, ctx: &Context, now: f64) {
+        if let Some(text) = self.editor_selected_text(ctx) {
+            ctx.copy_text(text);
+            self.toast("已复制选中文本", now);
+        }
+    }
+
+    /// 右键「粘贴」：替换选区或在光标插入
+    pub fn editor_paste(&mut self, ctx: &Context, now: f64) {
+        let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) else {
+            self.toast("剪贴板里没有文本", now);
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let (a, b) = self.editor_cursor_chars(ctx).unwrap_or((0, 0));
+        let idx = self.active;
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let ba = char_to_byte(&tab.text, a);
+        let bb = char_to_byte(&tab.text, b);
+        tab.text.replace_range(ba..bb, &text);
+        let nc = tab.text[..ba + text.len()].chars().count();
+        self.editor_touch(idx, now);
+        self.editor_store_cursor(ctx, nc, nc);
+    }
+
+    /// 右键「全选」
+    pub fn editor_select_all(&mut self, ctx: &Context) {
+        let len = self.tab().map(|t| t.text.chars().count()).unwrap_or(0);
+        if len > 0 {
+            self.editor_store_cursor(ctx, 0, len);
+            ctx.memory_mut(|m| m.request_focus(self.editor_id()));
         }
     }
 
@@ -1021,6 +1120,14 @@ impl App {
     }
 
     /// 收藏 / 取消收藏当前文档
+    /// 复制全文（Markdown 源码）
+    pub fn copy_all_md(&mut self, now: f64) {
+        if let Some(t) = self.tab() {
+            ctx_copy(t.text.clone());
+            self.toast("已复制全文（Markdown）", now);
+        }
+    }
+
     pub fn toggle_favorite(&mut self, now: f64) {
         let Some(p) = self.active_path() else {
             self.toast("没有打开的文件", now);
@@ -1657,11 +1764,15 @@ impl App {
                         .inner_margin(Margin::symmetric(10, 0)),
                 )
                 .show(ui, |ui| self.ui_minimal_bar(ui, now));
-            egui::CentralPanel::default()
+            let central = egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(self.pal.content))
                 .show(ui, |ui| self.ui_minimal_content(ui, now));
+            self.maybe_open_content_menu(&ctx, central.response.rect, now);
             self.ui_overlays(&ctx, now);
             self.draw_drag_overlay(&ctx, now);
+            if self.content_menu.is_some() {
+                self.ui_content_menu(&ctx, now);
+            }
             return;
         }
 
@@ -1709,11 +1820,12 @@ impl App {
                 sw: 0,
                 se: 0,
             });
-        egui::CentralPanel::default()
+        let central = egui::CentralPanel::default()
             .frame(card)
             .show(ui, |ui| {
                 self.ui_main(ui, now);
             });
+        self.maybe_open_content_menu(&ctx, central.response.rect, now);
 
         self.ui_overlays(&ctx, now);
         self.draw_drag_overlay(&ctx, now);
@@ -1833,6 +1945,13 @@ impl eframe::App for App {
             }
         }
         self.persist();
+    }
+}
+
+/// 无 Context 时写剪贴板（arboard）
+fn ctx_copy(text: String) {
+    if let Ok(mut c) = arboard::Clipboard::new() {
+        let _ = c.set_text(text);
     }
 }
 
