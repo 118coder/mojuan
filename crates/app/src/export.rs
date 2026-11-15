@@ -59,7 +59,6 @@ type BOOL = i32;
 
 const PATCOPY: u32 = 0x00F0_0021;
 const SRCCOPY: u32 = 0x00CC_0020;
-const NULL_PEN: isize = 8;
 const TA_TOP_LEFT: u32 = 0;
 const BK_TRANSPARENT: i32 = 1;
 const FW_NORMAL: i32 = 400;
@@ -67,7 +66,6 @@ const FW_BOLD: i32 = 700;
 const CLEARTYPE_QUALITY: u32 = 5;
 const DEFAULT_CHARSET: u32 = 1;
 const LOGPIXELSX: i32 = 88;
-const LOGPIXELSY: i32 = 90;
 const HORZRES: i32 = 8;
 const VERTRES: i32 = 10;
 
@@ -392,7 +390,6 @@ impl DocPainter {
                 if !cur.is_empty() {
                     lines.push(std::mem::take(&mut cur));
                 }
-                cur_w = 0.0;
             }};
         }
         for (i, (text, run)) in runs.iter().enumerate() {
@@ -422,11 +419,13 @@ impl DocPainter {
                         }
                         cur.push((i, head.clone()));
                         flush_line!();
+                        cur_w = 0.0;
                         piece = piece[head.len()..].to_string();
                         w = self.text_w(f, &piece);
                     }
                     if cur_w + w > max_w && !cur.is_empty() {
                         flush_line!();
+                        cur_w = 0.0;
                     }
                     cur.push((i, piece));
                     cur_w += w;
@@ -447,6 +446,7 @@ impl DocPainter {
                     let sw = self.text_w(f, " ");
                     if cur_w + sw > max_w && !cur.is_empty() {
                         flush_line!();
+                        cur_w = 0.0;
                     } else {
                         cur.push((i, " ".to_string()));
                         cur_w += sw;
@@ -456,6 +456,7 @@ impl DocPainter {
                     let cw = self.text_w(f, &ch.to_string());
                     if cur_w + cw > max_w && !cur.is_empty() {
                         flush_line!();
+                        cur_w = 0.0;
                     }
                     cur.push((i, ch.to_string()));
                     cur_w += cw;
@@ -679,7 +680,7 @@ impl DocPainter {
     fn paint_table(&mut self, head: &[Vec<Run>], rows: &[Vec<Vec<Run>>]) {
         let cols = head.len().max(1);
         let mut weights = vec![1usize; cols];
-        let mut weight_of = |cell: &Vec<Run>, w: &mut Vec<usize>| {
+        let weight_of = |cell: &Vec<Run>, w: &mut Vec<usize>| {
             for (i, r) in cell.iter().enumerate() {
                 if i < cols {
                     w[i] = w[i].max(r.text.chars().count().max(1));
@@ -703,7 +704,7 @@ impl DocPainter {
         let pad = 6.0 * self.scale;
         let lh = self.lh(self.fonts.body.px, 1.4);
 
-        let mut paint_row = |p: &mut DocPainter, cells: &[(Vec<Run>, bool)], y_start: &mut f32| {
+        let paint_row = |p: &mut DocPainter, cells: &[(Vec<Run>, bool)], y_start: &mut f32| {
             let mut row_h = 0.0f32;
             let mut prepared: Vec<(Vec<(String, Run)>, Vec<Vec<(usize, String)>>)> = Vec::new();
             for (i, (runs, is_head)) in cells.iter().enumerate() {
@@ -721,7 +722,7 @@ impl DocPainter {
             }
             let head_bg = cells.first().map(|c| c.1).unwrap_or(false);
             p.fill(p.x0, *y_start, avail, row_h, if head_bg { TABLE_HEAD } else { WHITE });
-            let mut y = *y_start + pad;
+            let y = *y_start + pad;
             for (i, (owned, lines)) in prepared.iter().enumerate() {
                 let cx = p.x0 + col_ws[..i].iter().sum::<f32>() + pad;
                 let mut cy = y;
@@ -914,7 +915,6 @@ pub fn export_png(text: &str, base: Option<&Path>, out: &Path) -> Result<String,
     if it.huge() {
         return Err("文档太长，长图导出仅支持 18 万字以内的文档（PDF / Word 不限）".into());
     }
-    let content_w = PNG_WIDTH - PNG_MARGIN * 2.0;
     let caches: (ImgCache, ImgCache) =
         (Rc::new(RefCell::new(HashMap::new())), Rc::new(RefCell::new(HashMap::new())));
 
@@ -1005,7 +1005,6 @@ pub fn export_pdf(text: &str, base: Option<&Path>, title: &str, out: &Path) -> R
     let ret = (|| -> Result<(), String> {
         unsafe {
             let dpi_x = GetDeviceCaps(hdc, LOGPIXELSX).max(96) as f32;
-            let dpi_y = GetDeviceCaps(hdc, LOGPIXELSY).max(96) as f32;
             let page_w = GetDeviceCaps(hdc, HORZRES) as f32;
             let page_h = GetDeviceCaps(hdc, VERTRES) as f32;
             let scale = dpi_x / 96.0;
@@ -1029,7 +1028,7 @@ pub fn export_pdf(text: &str, base: Option<&Path>, title: &str, out: &Path) -> R
             let mut p = DocPainter::new(hdc, content_w, false, scale, 16.0, caches.clone());
             let mut probe = DocPainter::new(hdc, content_w, true, scale, 16.0, caches.clone());
             let mut page_open = false;
-            let mut start_page = |page_open: &mut bool| {
+            let start_page = |page_open: &mut bool| {
                 if !*page_open {
                     StartPage(hdc);
                     *page_open = true;
@@ -1381,7 +1380,7 @@ impl DocxBuilder {
              <w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"E3E3E3\"/><w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"E3E3E3\"/>\
              </w:tblBorders></w:tblPr><w:tblGrid>{grid}</w:tblGrid>"
         ));
-        let mut cell = |b: &mut Self, runs: &[Run], head_cell: bool| {
+        let cell = |b: &mut Self, runs: &[Run], head_cell: bool| {
             b.body.push_str("<w:tc><w:tcPr>");
             if head_cell {
                 b.body.push_str("<w:shd w:val=\"clear\" w:fill=\"F7F7F7\"/>");
