@@ -5,6 +5,7 @@
 mod app;
 mod art;
 mod devshot;
+mod export;
 mod fonts;
 mod img;
 mod icons;
@@ -14,10 +15,18 @@ mod update;
 mod win;
 
 use eframe::egui;
+use mojuan_core::ViewMode;
+use std::path::PathBuf;
 
 fn main() -> eframe::Result<()> {
     // 更新替换后，清掉上次留下的旧版本
     update::cleanup_old_exe();
+    // 命令行打开文件：双击 .md 关联 / 手动传参（忽略 - 开头的选项）
+    let open_file: Option<PathBuf> = std::env::args()
+        .nth(1)
+        .filter(|s| !s.starts_with('-'))
+        .map(PathBuf::from)
+        .filter(|p| p.is_file());
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1340.0, 880.0])
@@ -29,6 +38,20 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "mojuan",
         opts,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(move |cc| {
+            let mut app = app::App::new(cc);
+            if let Some(p) = open_file {
+                app.open_path(p);
+                // 双击/命令行打开：默认极简模式，打开即见内容。
+                // md 先出渲染页（上次会话可能把全局模式留在编辑）；txt 已在 open_path 里设为编辑
+                if app.store.settings.minimal_open {
+                    app.minimal = true;
+                    if !app.tab().map(|t| t.plain).unwrap_or(false) {
+                        app.store.settings.mode = ViewMode::Read;
+                    }
+                }
+            }
+            Ok(Box::new(app))
+        }),
     )
 }

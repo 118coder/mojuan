@@ -145,6 +145,7 @@ impl App {
                 let mut lh = self.store.settings.line_spacing;
                 let mut autosave = self.store.settings.autosave;
                 let mut check_updates = self.store.settings.check_updates;
+                let mut minimal_open = self.store.settings.minimal_open;
                 let mut repo = self.store.settings.update_repo.clone();
                 let mut do_check = false;
                 let mut theme_idx = match self.store.settings.theme {
@@ -182,6 +183,7 @@ impl App {
                     );
                     ui.add_space(12.0);
                     ui.checkbox(&mut autosave, "编辑时自动保存");
+                    ui.checkbox(&mut minimal_open, "打开文件时进入极简模式（打开即见内容）");
 
                     ui.add_space(14.0);
                     widgets::hairline(ui, &pal);
@@ -215,6 +217,7 @@ impl App {
                 self.store.settings.line_spacing = lh;
                 self.store.settings.autosave = autosave;
                 self.store.settings.check_updates = check_updates;
+                self.store.settings.minimal_open = minimal_open;
                 self.store.settings.update_repo = repo.clone();
                 let _ = self.store.save();
                 if do_check {

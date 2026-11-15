@@ -34,6 +34,8 @@ pub struct Tab {
     pub text: String,
     pub crlf: bool,
     pub dirty: bool,
+    /// 纯文本（txt）：不按 Markdown 解析与着色
+    pub plain: bool,
     pub doc: doc::Doc,
     pub needs_parse: bool,
     pub last_edit: f64,
@@ -44,16 +46,31 @@ pub struct Tab {
     pub cursor_line: usize,
     pub cursor_col: usize,
     pub mtime: Option<SystemTime>,
+    /// 文本修订号：每次编辑 +1，虚拟预览据此判断是否需要重建索引
+    pub rev: u64,
+    /// 大文档虚拟预览状态（每个标签独立）
+    pub vpreview: crate::ui::vpreview::State,
+    /// 行起始字节表（大文档编辑窗口用；懒构建）
+    pub line_starts: Vec<usize>,
+    pub line_starts_rev: u64,
+    // 大文档编辑滑动窗口
+    pub win_text: String,
+    pub win_start: usize,
+    pub win_end: usize,
+    pub win_first_line: usize,
+    pub win_valid: bool,
 }
 
 impl Tab {
     pub fn new(path: PathBuf, text: String, crlf: bool) -> Self {
         let title = files::display_name(&path);
+        let plain = files::ext_of(&path) == "txt";
         Self {
             path,
             title,
             text,
             crlf,
+            plain,
             dirty: false,
             doc: doc::Doc::default(),
             needs_parse: true,
@@ -65,6 +82,15 @@ impl Tab {
             cursor_line: 1,
             cursor_col: 1,
             mtime: None,
+            rev: 1,
+            vpreview: crate::ui::vpreview::State::default(),
+            line_starts: Vec::new(),
+            line_starts_rev: 0,
+            win_text: String::new(),
+            win_start: 0,
+            win_end: 0,
+            win_first_line: 0,
+            win_valid: false,
         }
     }
 }
@@ -174,6 +200,8 @@ pub struct App {
     pub images: crate::img::Loader,
     pub updater: crate::update::Updater,
     pub more_menu: bool,
+    /// 极简模式：无侧栏/状态栏/标签条，打开即见内容（类似记事本）
+    pub minimal: bool,
 }
 
 impl App {
@@ -221,6 +249,7 @@ impl App {
             images: crate::img::Loader::default(),
             updater: crate::update::Updater::default(),
             more_menu: false,
+            minimal: false,
         };
 
         // 恢复上次的工作区 / 文件
@@ -356,11 +385,16 @@ impl App {
         }
         match files::read_doc(&path) {
             Ok((text, crlf)) => {
+                let plain = files::ext_of(&path) == "txt";
                 let mut tab = Tab::new(path.clone(), text, crlf);
                 tab.mtime = files::mtime(&path);
                 self.tabs.push(tab);
                 self.active = self.tabs.len() - 1;
                 self.store.touch_file(&path);
+                // txt 按记事本体验直入编辑
+                if plain {
+                    self.store.settings.mode = ViewMode::Edit;
+                }
                 // 没有工作区时，把文件所在目录作为工作区，左侧文件树才有内容
                 if self.ws.is_none() {
                     if let Some(parent) = path.parent() {
@@ -489,10 +523,24 @@ impl App {
     // -- 解析 / 搜索 ------------------------------------------------------
 
     pub fn parse_pending(&mut self, now: f64) {
+        let size = self.store.settings.font_size;
+        let width = self.store.settings.measure;
         let Some(tab) = self.tab_mut() else { return };
         if tab.needs_parse && now - tab.last_edit > 0.09 {
             let base = tab.path.parent().map(|p| p.to_path_buf());
-            tab.doc = doc::parse(&tab.text, base.as_deref());
+            if tab.text.len() > crate::ui::vpreview::VIRTUAL_THRESHOLD {
+                // 大文档：只建偏移索引 + 目录/统计，绝不生成整篇 AST
+                // （txt 也走这条路，渲染时视口内的切片再按纯文本解析）
+                let meta = {
+                    let idx = tab.vpreview.prepare(&tab.text, size, width, tab.rev);
+                    mojuan_core::large::build_meta(&tab.text, idx)
+                };
+                tab.doc = meta;
+            } else if tab.plain {
+                tab.doc = doc::parse_plain(&tab.text);
+            } else {
+                tab.doc = doc::parse(&tab.text, base.as_deref());
+            }
             tab.needs_parse = false;
         }
     }
@@ -622,9 +670,20 @@ impl App {
                 (true, false, false, Key::Minus) => {
                     self.store.settings.font_size = (self.store.settings.font_size - 1.0).max(12.0);
                 }
+                (true, false, false, Key::Num0) => {
+                    self.store.settings.font_size = 16.0;
+                }
                 (false, false, false, Key::Escape) => {
                     self.menu = None;
                     self.palette.open = false;
+                    self.more_menu = false;
+                    self.ws_menu = false;
+                    self.updater.banner = false;
+                    self.updater.dialog_open = false;
+                    // 极简模式下 Esc 直接回到完整界面
+                    if self.minimal {
+                        self.minimal = false;
+                    }
                 }
                 _ => {}
             }
@@ -654,6 +713,8 @@ impl App {
         new_text.push_str(right);
         new_text.push_str(&text[byte_b..]);
         tab.text = new_text;
+        tab.rev = tab.rev.wrapping_add(1);
+        tab.win_valid = false;
         tab.dirty = true;
         tab.needs_parse = true;
         tab.last_edit = ctx.input(|i| i.time);
@@ -740,6 +801,66 @@ impl App {
         }
     }
 
+    /// 导出共通：取文本所有权（避免千万字克隆），导完放回
+    fn with_text<R>(&mut self, f: impl FnOnce(&str, Option<&Path>) -> Result<R, String>) -> Result<R, String> {
+        if self.tabs.is_empty() {
+            return Err("没有打开的文档".into());
+        }
+        let base = self.tabs[self.active].path.parent().map(|p| p.to_path_buf());
+        let mut text = std::mem::take(&mut self.tabs[self.active].text);
+        let r = f(&text, base.as_deref());
+        self.tabs[self.active].text = std::mem::take(&mut text);
+        r
+    }
+
+    pub fn export_docx(&mut self, now: f64) {
+        let default_name = self.tab().map(|t| t.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "document".into()));
+        let Some(default_name) = default_name else { return };
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{default_name}.docx"))
+            .add_filter("Word 文档", &["docx"])
+            .save_file()
+        {
+            let result = self.with_text(|text, base| crate::export::export_docx(text, base, &default_name, &path));
+            match result {
+                Ok(msg) => self.toast(msg, now),
+                Err(e) => self.toast(format!("导出失败：{e}"), now),
+            }
+        }
+    }
+
+    pub fn export_pdf(&mut self, now: f64) {
+        let default_name = self.tab().map(|t| t.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "document".into()));
+        let Some(default_name) = default_name else { return };
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{default_name}.pdf"))
+            .add_filter("PDF", &["pdf"])
+            .save_file()
+        {
+            let result = self.with_text(|text, base| crate::export::export_pdf(text, base, &default_name, &path));
+            match result {
+                Ok(msg) => self.toast(msg, now),
+                Err(e) => self.toast(format!("导出失败：{e}"), now),
+            }
+        }
+    }
+
+    pub fn export_png(&mut self, now: f64) {
+        let default_name = self.tab().map(|t| t.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "document".into()));
+        let Some(default_name) = default_name else { return };
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{default_name}.png"))
+            .add_filter("PNG 长图", &["png"])
+            .save_file()
+        {
+            let result = self.with_text(|text, base| crate::export::export_png(text, base, &path));
+            match result {
+                Ok(msg) => self.toast(msg, now),
+                Err(e) => self.toast(format!("导出失败：{e}"), now),
+            }
+        }
+    }
+
     // -- 布局 -------------------------------------------------------------
 
     pub fn layout(&mut self, ui: &mut Ui) {
@@ -781,6 +902,23 @@ impl App {
                     self.save_active(now);
                 }
             }
+        }
+
+        // 极简模式：只有一条细工具条 + 内容，双击打开文件时默认走这条路
+        if self.minimal && !self.tabs.is_empty() {
+            egui::Panel::top("minimal-bar")
+                .exact_size(34.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(self.pal.panel)
+                        .inner_margin(Margin::symmetric(10, 0)),
+                )
+                .show(ui, |ui| self.ui_minimal_bar(ui, now));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(self.pal.bg))
+                .show(ui, |ui| self.ui_minimal_content(ui, now));
+            self.ui_overlays(&ctx, now);
+            return;
         }
 
         egui::Panel::top("topbar")
@@ -857,8 +995,8 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 pub fn standalone_html(title: &str, body: &str, theme: Theme) -> String {
     let scheme = if matches!(theme, Theme::Dark) { "dark" } else { "light" };
     let (bg, fg, dim, border, accent, code_bg, link) = match theme {
-        Theme::Dark => ("#181513", "#E9E3D8", "#9C9186", "#2C2723", "#C4614A", "#1A1714", "#CB9C68"),
-        Theme::Light => ("#FFFDF8", "#2B2621", "#7B7267", "#E2D9C9", "#B24A36", "#F4EFE3", "#9A6A38"),
+        Theme::Dark => ("#202020", "#E6E6E6", "#9D9D9D", "#3D3D3D", "#4CC2FF", "#2B2B2B", "#4CC2FF"),
+        Theme::Light => ("#FFFFFF", "#1B1B1B", "#5E5E5E", "#E5E5E5", "#0067C0", "#F6F6F6", "#0067C0"),
     };
     let escaped = html_escape(title);
     format!(

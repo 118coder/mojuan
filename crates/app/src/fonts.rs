@@ -12,6 +12,8 @@ pub const SANS_BOLD: &str = "mj-sans-bold";
 pub const MONO: &str = "mj-mono";
 pub const MONO_BOLD: &str = "mj-mono-bold";
 pub const EMOJI: &str = "mj-emoji";
+/// 数学符号兜底：雅黑缺下标数字（₀₁₃）、₌、ᵢ 这类字形，Segoe UI 全覆盖
+pub const FALLBACK: &str = "mj-fallback";
 
 #[allow(dead_code)]
 pub struct FontSet {
@@ -38,6 +40,8 @@ pub fn install(ctx: &egui::Context) -> FontSet {
     let win = windir();
     let f = |name: &str| format!("{win}/Fonts/{name}");
 
+    // eframe 的 default_fonts 特性已关：不再内嵌 Ubuntu/Noto（省 ~1MB exe），
+    // 字形全部来自系统字体；Family 列表在下方从零构建。
     let mut fonts = egui::FontDefinitions::default();
     let mut found_cjk = false;
 
@@ -95,9 +99,20 @@ pub fn install(ctx: &egui::Context) -> FontSet {
         fonts.font_data.insert(MONO_BOLD.to_owned(), Arc::new(fd));
     }
 
+    // 数学符号兜底：雅黑缺 ₀₁₃、₌、ᵢ 这类上下标字形（U+2080 区段只有 2/20），
+    // Segoe UI 实测 20/20 全覆盖，挂在字族末位按字形回退
+    if let Some((bytes, idx)) = load_first(&[(&f("segoeui.ttf"), 0)]) {
+        let mut fd = egui::FontData::from_owned(bytes);
+        fd.index = idx;
+        fonts.font_data.insert(FALLBACK.to_owned(), Arc::new(fd));
+    }
+
     let mut prop: Vec<String> = Vec::new();
     if found_cjk {
         prop.push(SANS.to_owned());
+    }
+    if fonts.font_data.contains_key(FALLBACK) {
+        prop.push(FALLBACK.to_owned());
     }
     prop.extend(default_family(&fonts, egui::FontFamily::Proportional));
     if fonts.font_data.contains_key(EMOJI) {
@@ -110,11 +125,10 @@ pub fn install(ctx: &egui::Context) -> FontSet {
             fonts.font_data.insert(SANS_BOLD.to_owned(), fd);
         }
     }
-    let sans_bold_list = vec![
-        SANS_BOLD.to_owned(),
-        SANS.to_owned(),
-        "Ubuntu-Light".to_owned(),
-    ];
+    let mut sans_bold_list = vec![SANS_BOLD.to_owned(), SANS.to_owned()];
+    if fonts.font_data.contains_key(FALLBACK) {
+        sans_bold_list.push(FALLBACK.to_owned());
+    }
     if fonts.font_data.contains_key(SANS_BOLD) || fonts.font_data.contains_key(SANS) {
         fonts
             .families

@@ -41,10 +41,17 @@ pub struct Settings {
     pub check_updates: bool,
     /// 更新源（GitHub owner/repo），留空则用内置默认值
     pub update_repo: String,
+    /// 带文件路径启动时进入极简模式（打开即见内容，类似记事本）
+    #[serde(default = "default_true")]
+    pub minimal_open: bool,
     pub last_workspace: Option<String>,
     pub last_file: Option<String>,
     /// 窗口位置与尺寸 [x, y, w, h]
     pub window: Option<[f32; 4]>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -61,6 +68,7 @@ impl Default for Settings {
             split_ratio: 0.5,
             check_updates: true,
             update_repo: String::new(),
+            minimal_open: true,
             last_workspace: None,
             last_file: None,
             window: None,

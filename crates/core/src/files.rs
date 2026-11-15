@@ -115,28 +115,102 @@ pub fn walk_md(root: &Path, limit: usize) -> Vec<PathBuf> {
     out
 }
 
-/// 读取文本：优先 UTF-8，失败时按 GB18030 解码（兼容老的中文文件）。
+/// 读取文本：优先 UTF-8，失败时按 GBK/GB18030 解码（兼容老的中文文件）。
+/// 编码表不进 exe：GBK 用系统 MultiByteToWideChar（CP936），UTF-16 用标准库。
 /// 返回 (内容, 是否为 CRLF 换行)，内容统一归一化成 \n。
 pub fn read_doc(path: &Path) -> Result<(String, bool), String> {
     let bytes = fs::read(path).map_err(|e| format!("读取失败：{e}"))?;
     if bytes.len() > 40 * 1024 * 1024 {
         return Err("文件过大（超过 40MB）".into());
     }
-    let (decoded, _, _) = encoding_rs::UTF_8.decode(&bytes);
-    let mut text = if decoded.contains('\u{FFFD}') {
-        let (gbk, _, _) = encoding_rs::GB18030.decode(&bytes);
-        gbk.into_owned()
-    } else {
-        decoded.into_owned()
+    let text = decode_text(&bytes);
+    // decode_text 已剥各编码的 BOM，这里兜底 GBK 解码残留
+    let text = match text.strip_prefix('\u{FEFF}') {
+        Some(rest) => rest.to_string(),
+        None => text,
     };
-    if text.starts_with('\u{FEFF}') {
-        text.remove(0);
-    }
     let crlf = text.contains("\r\n");
-    if crlf {
-        text = text.replace("\r\n", "\n");
-    }
+    let text = if crlf { text.replace("\r\n", "\n") } else { text };
     Ok((text, crlf))
+}
+
+/// BOM 嗅探 + 严格 UTF-8 → GBK 兜底
+fn decode_text(bytes: &[u8]) -> String {
+    // UTF-16 BOM（老记事本的 Unicode 保存格式）
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let mut s = String::from_utf16_lossy(&units);
+        if s.starts_with('\u{FEFF}') {
+            s.remove(0);
+        }
+        return s;
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        let mut s = String::from_utf16_lossy(&units);
+        if s.starts_with('\u{FEFF}') {
+            s.remove(0);
+        }
+        return s;
+    }
+    // UTF-8 BOM
+    let rest = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) { &bytes[3..] } else { bytes };
+    if let Ok(s) = std::str::from_utf8(rest) {
+        return s.to_string();
+    }
+    decode_gbk(rest)
+}
+
+#[cfg(windows)]
+fn decode_gbk(bytes: &[u8]) -> String {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MultiByteToWideChar(
+            code_page: u32,
+            flags: u32,
+            src: *const u8,
+            src_len: i32,
+            dst: *mut u16,
+            dst_len: i32,
+        ) -> i32;
+    }
+    const CP_GBK: u32 = 936;
+    const MB_ERR_INVALID_CHARS: u32 = 8;
+    unsafe {
+        // 先严格转换（暴露坏字节），失败则宽松重转，最后实在不行按 UTF-8 lossy
+        let strict = MultiByteToWideChar(
+            CP_GBK,
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            std::ptr::null_mut(),
+            0,
+        );
+        let flags = if strict > 0 { MB_ERR_INVALID_CHARS } else { 0 };
+        let n = if strict > 0 {
+            strict
+        } else {
+            MultiByteToWideChar(CP_GBK, 0, bytes.as_ptr(), bytes.len() as i32, std::ptr::null_mut(), 0)
+        };
+        if n <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut buf = vec![0u16; n as usize];
+        MultiByteToWideChar(CP_GBK, flags, bytes.as_ptr(), bytes.len() as i32, buf.as_mut_ptr(), n);
+        String::from_utf16_lossy(&buf)
+    }
+}
+
+#[cfg(not(windows))]
+fn decode_gbk(bytes: &[u8]) -> String {
+    // 非 Windows 构建没有系统 GBK 表，退化为 UTF-8 lossy
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 pub fn write_doc(path: &Path, text: &str, crlf: bool) -> Result<(), String> {

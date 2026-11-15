@@ -6,9 +6,8 @@ license.workspace = true
 
 [dependencies]
 comrak = { version = "0.59", default-features = false }
-syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
+syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-onig"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-encoding_rs = "0.8"
 trash = "5.3"
 dirs = "7"

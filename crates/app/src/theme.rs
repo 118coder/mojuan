@@ -1,16 +1,17 @@
 //! 设计系统：调色板 + egui 样式。
 //!
-//! 配色思路：暗色是「墨与纸」的暖黑，亮色是米白纸，主色用朱砂红，
-//! 避免常见的紫蓝渐变；代码配色同时为两套主题准备，保证对比度。
+//! 配色思路：只有黑、白两套主题，全部用中性灰层叠，贴 Windows 11 原生观感
+//! （Fluent：#F3F3F3 窗口底 / 白色表面 / #E5E5E5 发丝线 / 系统蓝强调）。
+//! 代码配色取 VS Code Light / Dark 的经典方案，Windows 用户一眼熟悉。
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle,
 };
 use mojuan_core::{Theme, TokenStyle};
 
-pub const R_SM: u8 = 6;
-pub const R_MD: u8 = 10;
-pub const R_LG: u8 = 14;
+pub const R_SM: u8 = 4;
+pub const R_MD: u8 = 8;
+pub const R_LG: u8 = 10;
 
 pub fn c(hex: u32) -> Color32 {
     Color32::from_rgb(
@@ -112,87 +113,89 @@ impl Palette {
             Theme::Dark => Self {
                 theme,
                 dark: true,
-                bg: c(0x121110),
-                panel: c(0x171514),
-                elev: c(0x1E1B18),
-                edit_bg: c(0x121110),
-                read_bg: c(0x181513),
-                border: c(0x2C2723),
-                border_soft: c(0x221E1B),
-                text: c(0xEDE7DC),
-                text_dim: c(0x9C9186),
-                text_faint: c(0x6B625A),
-                accent: c(0xC4614A),
-                accent_hover: c(0xD7745C),
-                accent_soft: Color32::from_rgba_unmultiplied(196, 97, 74, 30),
-                link: c(0xCB9C68),
-                code_bg: c(0x1A1714),
-                code_border: c(0x2A2521),
-                inline_code_bg: c(0x272220),
-                quote_bar: c(0x6E4B3E),
-                table_head: c(0x1D1A17),
-                table_line: c(0x2A2521),
-                sel: Color32::from_rgba_unmultiplied(196, 97, 74, 64),
-                danger: c(0xD86A5A),
-                check: c(0x8FA678),
+                // Win11 暗色：#202020 窗口，#282828 面板，#333333 悬浮层
+                bg: c(0x202020),
+                panel: c(0x282828),
+                elev: c(0x333333),
+                edit_bg: c(0x202020),
+                read_bg: c(0x202020),
+                border: c(0x3D3D3D),
+                border_soft: c(0x323232),
+                text: c(0xFFFFFF),
+                text_dim: c(0xC5C5C5),
+                text_faint: c(0x8B8B8B),
+                accent: c(0x4CC2FF),
+                accent_hover: c(0x6ACDFF),
+                accent_soft: Color32::from_rgba_unmultiplied(76, 194, 255, 26),
+                link: c(0x4CC2FF),
+                code_bg: c(0x2B2B2B),
+                code_border: c(0x3C3C3C),
+                inline_code_bg: c(0x333333),
+                quote_bar: c(0x6E6E6E),
+                table_head: c(0x2A2A2A),
+                table_line: c(0x3C3C3C),
+                sel: Color32::from_rgba_unmultiplied(76, 194, 255, 52),
+                danger: c(0xF14C4C),
+                check: c(0x6CCB5F),
                 tokens: Tokens {
-                    plain: c(0xD9D2C7),
-                    comment: c(0x6F6A61),
-                    keyword: c(0xC9836F),
-                    string: c(0x9EB289),
-                    number: c(0xCCA468),
-                    constant: c(0xCCA468),
-                    function: c(0x93B0C6),
-                    ty: c(0xC5A97B),
-                    tag: c(0xC48A73),
-                    attribute: c(0xB99E77),
-                    variable: c(0xD6CFC3),
-                    operator: c(0xA89B8C),
-                    punct: c(0x877E74),
-                    invalid: c(0xE0705E),
+                    plain: c(0xD4D4D4),
+                    comment: c(0x6A9955),
+                    keyword: c(0x569CD6),
+                    string: c(0xCE9178),
+                    number: c(0xB5CEA8),
+                    constant: c(0x4FC1FF),
+                    function: c(0xDCDCAA),
+                    ty: c(0x4EC9B0),
+                    tag: c(0x569CD6),
+                    attribute: c(0x9CDCFE),
+                    variable: c(0x9CDCFE),
+                    operator: c(0xC8C8C8),
+                    punct: c(0xA0A0A0),
+                    invalid: c(0xF14C4C),
                 },
             },
             Theme::Light => Self {
                 theme,
                 dark: false,
-                bg: c(0xF5F1E8),
-                panel: c(0xFAF7F1),
-                elev: c(0xFFFDF9),
-                edit_bg: c(0xFCFAF5),
-                read_bg: c(0xFFFDF8),
-                border: c(0xE2D9C9),
-                border_soft: c(0xECE4D5),
-                text: c(0x2B2621),
-                text_dim: c(0x7B7267),
-                text_faint: c(0xA79D8E),
-                accent: c(0xB24A36),
-                accent_hover: c(0xC25A44),
-                accent_soft: Color32::from_rgba_unmultiplied(178, 74, 54, 24),
-                link: c(0x9A6A38),
-                code_bg: c(0xF4EFE3),
-                code_border: c(0xE4DACA),
-                inline_code_bg: c(0xEDE6D6),
-                quote_bar: c(0xC9A98F),
-                table_head: c(0xF3EDE0),
-                table_line: c(0xE6DDCC),
-                sel: Color32::from_rgba_unmultiplied(178, 74, 54, 46),
-                danger: c(0xB4442F),
-                check: c(0x6B8A55),
+                // Win11 亮色：#F3F3F3 窗口，白色表面，#E5E5E5 发丝线，系统蓝强调
+                bg: c(0xF3F3F3),
+                panel: c(0xF9F9F9),
+                elev: c(0xFFFFFF),
+                edit_bg: c(0xFFFFFF),
+                read_bg: c(0xFFFFFF),
+                border: c(0xE5E5E5),
+                border_soft: c(0xEFEFEF),
+                text: c(0x1B1B1B),
+                text_dim: c(0x5E5E5E),
+                text_faint: c(0x949494),
+                accent: c(0x0067C0),
+                accent_hover: c(0x1B77C8),
+                accent_soft: Color32::from_rgba_unmultiplied(0, 103, 192, 22),
+                link: c(0x0067C0),
+                code_bg: c(0xF6F6F6),
+                code_border: c(0xE8E8E8),
+                inline_code_bg: c(0xEFEFEF),
+                quote_bar: c(0xC9C9C9),
+                table_head: c(0xF7F7F7),
+                table_line: c(0xE3E3E3),
+                sel: Color32::from_rgba_unmultiplied(0, 103, 192, 42),
+                danger: c(0xC42B1C),
+                check: c(0x0F7B0F),
                 tokens: Tokens {
-                    plain: c(0x34302A),
-                    comment: c(0x8D8578),
-                    keyword: c(0xA5413A),
-                    string: c(0x4E7A52),
-                    number: c(0x8A6534),
-                    constant: c(0x8A6534),
-                    function: c(0x3F6A85),
-                    ty: c(0x7A5A32),
-                    tag: c(0x8A4A3A),
-                    attribute: c(0x7A5A32),
-                    variable: c(0x3A3630),
-                    operator: c(0x6B6259),
-                    punct: c(0x8C8578),
-                    invalid: c(0xB4442F),
+                    plain: c(0x1B1B1B),
+                    comment: c(0x767676),
+                    keyword: c(0x0067C0),
+                    string: c(0xA31515),
+                    number: c(0x098658),
+                    constant: c(0x0070C1),
+                    function: c(0x795E26),
+                    ty: c(0x267F99),
+                    tag: c(0x800000),
+                    attribute: c(0xB3491F),
+                    variable: c(0x001080),
+                    operator: c(0x333333),
+                    punct: c(0x5A5A5A),
+                    invalid: c(0xCD3131),
                 },
             },
         }
@@ -271,14 +274,14 @@ impl Palette {
         v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text);
         v.widgets.noninteractive.corner_radius = CornerRadius::same(R_SM);
 
-        v.widgets.inactive.bg_fill = alpha(self.text, if self.dark { 12 } else { 10 });
+        v.widgets.inactive.bg_fill = alpha(self.text, if self.dark { 12 } else { 6 });
         v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::TRANSPARENT);
         v.widgets.inactive.fg_stroke = Stroke::new(1.0, self.text_dim);
         v.widgets.inactive.corner_radius = CornerRadius::same(R_SM);
 
-        v.widgets.hovered.bg_fill = alpha(self.text, if self.dark { 22 } else { 16 });
-        v.widgets.hovered.weak_bg_fill = alpha(self.text, if self.dark { 22 } else { 14 });
+        v.widgets.hovered.bg_fill = alpha(self.text, if self.dark { 20 } else { 8 });
+        v.widgets.hovered.weak_bg_fill = alpha(self.text, if self.dark { 20 } else { 8 });
         v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::TRANSPARENT);
         v.widgets.hovered.fg_stroke = Stroke::new(1.0, self.text);
         v.widgets.hovered.corner_radius = CornerRadius::same(R_SM);

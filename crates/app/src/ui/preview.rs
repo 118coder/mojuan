@@ -12,6 +12,7 @@ use eframe::egui::{
 use mojuan_core::{Align as TAlign, Block, Doc, ListItem, Run};
 
 use crate::icons::{self, Icon};
+use crate::ui::blocks_extra;
 use crate::theme::{alpha, Palette, R_MD, R_SM};
 
 pub enum Action {
@@ -73,6 +74,25 @@ pub fn render(
         ui.add_space(pad);
     });
 
+    cx.acts
+}
+
+/// 供虚拟预览调用：只渲染传入的少量块（不做整篇布局）。
+pub fn render_blocks(
+    ui: &mut Ui,
+    pal: &Palette,
+    opts: &Opts,
+    items: &[Block],
+    pending: &mut Option<String>,
+    imgs: &mut crate::img::Loader,
+) -> Vec<Action> {
+    let mut cx = Ctx {
+        pal,
+        opts,
+        acts: Vec::new(),
+        imgs,
+    };
+    blocks(ui, &mut cx, items, pending, 0, false);
     cx.acts
 }
 
@@ -155,12 +175,30 @@ fn block(
             ui.add_space(bottom);
         }
         Block::Para(runs) => {
+            // 独占一段的 $$ ... $$：完整解析路径里 comrak 会当成普通段落
+            let plain: String = runs.iter().map(|r| r.text.as_str()).collect();
+            let t = plain.trim();
+            if t.starts_with("$$") && t.ends_with("$$") && t.len() > 4 {
+                let expr = t[2..t.len() - 2].trim();
+                blocks_extra::render_math_expr(ui, pal, cx.opts, expr);
+                ui.add_space(size * 0.6);
+                return;
+            }
             inline(ui, cx, runs, size, lh, pal.text, false, false);
             ui.add_space(size * 0.72);
         }
         Block::Code { lang, lines } => {
-            code_block(ui, cx, lang, lines);
-            ui.add_space(size * 0.7);
+            if lang.eq_ignore_ascii_case("mermaid") {
+                let src: String = lines
+                    .iter()
+                    .flat_map(|l| l.iter().map(|t| t.text.as_str()))
+                    .collect();
+                blocks_extra::render_mermaid_source(ui, pal, cx.opts, &src);
+                ui.add_space(size * 0.7);
+            } else {
+                code_block(ui, cx, lang, lines);
+                ui.add_space(size * 0.7);
+            }
         }
         Block::Quote(inner) => {
             let frame = Frame::new().inner_margin(Margin {
@@ -240,19 +278,39 @@ fn image_block(
     let max_w = ui.available_width();
     let max_h = (ui.ctx().viewport_rect().height() * 0.72).max(220.0);
 
-    let Some(path) = path else {
-        // 远程图片：给个可点的提示
-        image_notice(ui, cx, Icon::External, if alt.is_empty() { src } else { alt });
-        return;
+    // 本地 / 远程统一成一个「纹理 + 加载状态」三元组
+    let (tex, pending, failure) = match path {
+        Some(p) => {
+            let t = cx
+                .imgs
+                .get(ui.ctx(), p)
+                .map(|h| (h.id(), h.size_vec2()));
+            (
+                t,
+                cx.imgs.is_pending(p),
+                cx.imgs.failure(p).cloned(),
+            )
+        }
+        None if src.starts_with("http://") || src.starts_with("https://") => {
+            let t = cx
+                .imgs
+                .get_url(ui.ctx(), src)
+                .map(|h| (h.id(), h.size_vec2()));
+            (
+                t,
+                cx.imgs.url_pending(src),
+                cx.imgs.url_failure(src).cloned(),
+            )
+        }
+        None => {
+            // data: / 相对但无法解析的路径，仍给可点的提示
+            image_notice(ui, cx, Icon::External, if alt.is_empty() { src } else { alt });
+            return;
+        }
     };
 
-    let tex = cx
-        .imgs
-        .get(ui.ctx(), path)
-        .map(|t| (t.id(), t.size_vec2(), t.size_vec2()));
-
     match tex {
-        Some((id, natural, _)) => {
+        Some((id, natural)) => {
             let scale = (max_w / natural.x)
                 .min(max_h / natural.y)
                 .min(1.0)
@@ -270,34 +328,31 @@ fn image_block(
                     egui::StrokeKind::Inside,
                 );
             });
+            if !alt.is_empty() {
+                ui.add_space(4.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(alt).size(size * 0.72).color(pal.text_faint),
+                    );
+                });
+            }
+        }
+        None if pending => {
+            let h = (max_w * 0.3).clamp(80.0, 220.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(max_w, h), Sense::hover());
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(R_SM), alpha(pal.text, 8));
+            let g = ui.painter().layout_no_wrap(
+                "图片加载中…".to_string(),
+                FontId::new(size * 0.78, egui::FontFamily::Proportional),
+                pal.text_faint,
+            );
+            ui.painter()
+                .galley(rect.center() - g.size() / 2.0, g, pal.text_faint);
         }
         None => {
-            if cx.imgs.is_pending(path) {
-                let h = (max_w * 0.3).clamp(80.0, 220.0);
-                let (rect, _) = ui.allocate_exact_size(
-                    Vec2::new(max_w.min(max_w), h),
-                    Sense::hover(),
-                );
-                ui.painter().rect_filled(
-                    rect,
-                    CornerRadius::same(R_SM),
-                    alpha(pal.text, 8),
-                );
-                let g = ui.painter().layout_no_wrap(
-                    "图片加载中…".to_string(),
-                    FontId::new(size * 0.78, egui::FontFamily::Proportional),
-                    pal.text_faint,
-                );
-                ui.painter()
-                    .galley(rect.center() - g.size() / 2.0, g, pal.text_faint);
-            } else {
-                let msg = cx
-                    .imgs
-                    .failure(path)
-                    .cloned()
-                    .unwrap_or_else(|| "无法显示这张图片".to_string());
-                image_notice(ui, cx, Icon::Image, &format!("{}（{}）", msg, src));
-            }
+            let msg = failure.unwrap_or_else(|| "无法显示这张图片".to_string());
+            image_notice(ui, cx, Icon::Image, &format!("{}（{}）", msg, src));
         }
     }
 }
@@ -327,6 +382,57 @@ fn image_notice(ui: &mut Ui, cx: &Ctx, icon: Icon, text: &str) {
 
 fn rect_top_left(resp: &egui::Response) -> Pos2 {
     resp.rect.min
+}
+
+
+/// 把行内 `$...$` 换成可读的 Unicode 公式文本（`$$` 块级公式不在这里处理）。
+fn expand_inline_math(runs: &[Run]) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::with_capacity(runs.len());
+    for r in runs {
+        // 代码、链接、图片里出现的 `$` 保持原样
+        if r.code || r.link.is_some() || r.image.is_some() || !r.text.contains('$') {
+            out.push(r.clone());
+            continue;
+        }
+        let chars: Vec<char> = r.text.chars().collect();
+        let mut buf = String::new();
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '$' && chars.get(i + 1) != Some(&'$') {
+                if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '$') {
+                    if j == i + 1 {
+                        buf.push('$');
+                        i += 1;
+                        continue;
+                    }
+                    if !buf.is_empty() {
+                        out.push(Run {
+                            text: std::mem::take(&mut buf),
+                            ..r.clone()
+                        });
+                    }
+                    let latex: String = chars[i + 1..j].iter().collect();
+                    let layout = mojuan_core::math::parse_inline(&latex);
+                    out.push(Run {
+                        text: mojuan_core::math::render_unicode(&layout),
+                        italic: true,
+                        ..r.clone()
+                    });
+                    i = j + 1;
+                    continue;
+                }
+            }
+            buf.push(chars[i]);
+            i += 1;
+        }
+        if !buf.is_empty() {
+            out.push(Run {
+                text: buf,
+                ..r.clone()
+            });
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +527,7 @@ fn inline(
         runs.to_vec()
     };
 
+    let effective = expand_inline_math(&effective);
     let (job, links) = build_job(cx, &effective, size, line_height, color, wrap);
     let resp = ui.add(Label::new(job).selectable(true));
 
@@ -443,8 +550,12 @@ fn inline(
             }
         } else if resp.hovered() {
             if let Some(pos) = ui.ctx().pointer_hover_pos() {
-                if hit(pos).is_some() {
+                if let Some(url) = hit(pos) {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                    // 悬停时显示目标地址，避免误点外部链接
+                    resp.show_tooltip_ui(|ui| {
+                        ui.label(RichText::new(url).size(11.0));
+                    });
                 }
             }
         }
@@ -526,14 +637,30 @@ fn code_block(ui: &mut Ui, cx: &mut Ctx, lang: &str, lines: &[Vec<mojuan_core::h
             let body = |ui: &mut Ui| {
                 let mut job = LayoutJob::default();
                 job.wrap.max_width = f32::INFINITY;
-                for line in lines {
-                    for t in line {
-                        let fmt = TextFormat {
-                            font_id: FontId::new(size * 0.88, pal.mono()),
-                            color: pal.tokens.color(t.style),
-                            ..Default::default()
-                        };
-                        job.append(&t.text, 0.0, fmt);
+                let mut line_no = 1usize;
+                let mut at_line_start = true;
+                for t in lines.iter().flatten() {
+                    if at_line_start {
+                        job.append(
+                            &format!("{line_no:>3}  "),
+                            0.0,
+                            TextFormat {
+                                font_id: FontId::new(size * 0.78, pal.mono()),
+                                color: pal.text_faint,
+                                ..Default::default()
+                            },
+                        );
+                        line_no += 1;
+                        at_line_start = false;
+                    }
+                    let fmt = TextFormat {
+                        font_id: FontId::new(size * 0.88, pal.mono()),
+                        color: pal.tokens.color(t.style),
+                        ..Default::default()
+                    };
+                    job.append(&t.text, 0.0, fmt);
+                    if t.text.ends_with('\n') {
+                        at_line_start = true;
                     }
                 }
                 let label = Label::new(job)
@@ -815,6 +942,44 @@ fn table(ui: &mut Ui, cx: &mut Ctx, aligns: &[TAlign], head: &[Vec<Run>], rows: 
         Stroke::new(1.0, pal.table_line),
         egui::StrokeKind::Inside,
     );
+
+    // 6. 表格整体复制（单元格是手绘 galley，无法逐格框选，给一个明确的复制入口）
+    let copy_rect = Rect::from_min_size(
+        Pos2::new(rect.max.x - 40.0, rect.min.y + 4.0),
+        Vec2::new(34.0, 18.0),
+    );
+    let copy_resp = ui.interact(
+        copy_rect,
+        egui::Id::unique(("table-copy", rect.min.y as i32, head.len())),
+        Sense::click(),
+    );
+    if copy_resp.hovered() {
+        painter.rect_filled(copy_rect, CornerRadius::same(4), alpha(pal.text, 22));
+    }
+    let g = painter.layout_no_wrap(
+        "复制".to_string(),
+        FontId::new(10.0, egui::FontFamily::Proportional),
+        if copy_resp.hovered() { pal.text } else { pal.text_faint },
+    );
+    painter.galley(copy_rect.center() - g.size() / 2.0, g, pal.text_dim);
+    if copy_resp.clicked() {
+        let mut tsv = String::new();
+        let push_row = |cells: &[Vec<Run>], out: &mut String| {
+            for i in 0..cols {
+                if i > 0 {
+                    out.push('\t');
+                }
+                out.push_str(&cell_text(cells.get(i).map(|v| v.as_slice()).unwrap_or(&[])).replace('\n', " "));
+            }
+            out.push('\n');
+        };
+        push_row(head, &mut tsv);
+        for r in rows {
+            push_row(r, &mut tsv);
+        }
+        cx.acts.push(Action::Copy(tsv.clone()));
+        ui.ctx().copy_text(tsv);
+    }
 }
 
 pub fn open_external(url: &str) {

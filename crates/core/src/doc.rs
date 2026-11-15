@@ -43,6 +43,11 @@ impl Run {
             ..Default::default()
         }
     }
+
+    /// 无样式的普通文本 run（parse_plain 用，保持字段私有性）
+    pub fn default_with(text: impl Into<String>) -> Self {
+        Self::new(text)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +140,20 @@ pub fn parse(md: &str, base: Option<&Path>) -> Doc {
         blocks,
         toc,
         stats: stats(md),
+    }
+}
+
+/// 纯文本解析（txt）：每行一个段落块，不做任何 Markdown 语法处理，
+/// 避免 `#`、`*` 之类被误渲染。空行保留为空段落，行序与原文一致。
+pub fn parse_plain(text: &str) -> Doc {
+    let blocks = text
+        .split('\n')
+        .map(|line| Block::Para(vec![Run::default_with(line.strip_suffix('\r').unwrap_or(line))]))
+        .collect();
+    Doc {
+        blocks,
+        toc: Vec::new(),
+        stats: stats(text),
     }
 }
 
