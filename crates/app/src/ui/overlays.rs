@@ -157,9 +157,11 @@ impl App {
             }
         }
 
-        if self.menu.is_some() {
-            self.ui_ctx_menu(ctx, now);
-        }
+        // 无条件调用：关闭态在函数内清 rect/fresh（is_some 门住会让状态永远清不掉）
+        self.ui_ctx_menu(ctx, now);
+        // 标签右键菜单：曾只置状态从未渲染（死代码，右键标签条毫无反应），
+        // 这里补上渲染调用
+        self.ui_tab_menu(ctx, now);
         if self.dialog.is_some() {
             self.ui_dialog(ctx, now);
         }
@@ -487,6 +489,7 @@ impl App {
         let mut frame_resp: Option<egui::InnerResponse<()>> = None;
         let Some((is_editor, pos)) = self.content_menu else {
             self.content_menu_rect = None;
+            self.content_menu_fresh = false;
             return;
         };
         let pal = self.pal.clone();
@@ -560,10 +563,13 @@ impl App {
                         }
                     } else {
                         // 阅读区菜单
-                        ui.label(
-                            RichText::new("选中文字后按 Ctrl+C 复制")
-                                .size(10.5)
-                                .color(pal.text_faint),
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("选中文字后按 Ctrl+C 复制")
+                                    .size(10.5)
+                                    .color(pal.text_faint),
+                            )
+                            .selectable(false), // 菜单文字不可选中（商业软件惯例）
                         );
                         if widgets::menu_item(ui, &pal, Icon::Copy, "复制全文（Markdown）", false)
                             .clicked()
@@ -632,30 +638,23 @@ impl App {
         }
         let pointer = ctx.input(|i| i.pointer.interact_pos());
         let any_click = ctx.input(|i| i.pointer.any_click());
+        // hit 判定加 2pt 容差：egui 渲染 Area 时把位置取整到物理像素，
+        // 指针坐标不取整——松开在 x.5/y.5+ 的位置时菜单 rect 边界可能落在
+        // 指针外侧零点几 pt，此时「打开菜单的那次点击」会被误判成菜单外点击
         let inside_menu = match (self.content_menu_rect, pointer) {
-            (Some(r), Some(p)) => r.contains(p),
+            (Some(r), Some(p)) => r.expand(2.0).contains(p),
             _ => false,
         };
-        if any_click && !inside_menu {
-            if std::env::var("MJ_MENU_LOG").is_ok() {
-                crate::app::dbg_log(&format!(
-                    "[MENU] close click-outside pointer={pointer:?} rect={:?}",
-                    self.content_menu_rect
-                ));
-            }
+        // fresh：打开当帧的 any_click 就是打开菜单的那次点击，不是关闭手势
+        if any_click && !inside_menu && !self.content_menu_fresh {
             self.content_menu = None;
         }
+        self.content_menu_fresh = false;
         // 滚轮滚动时关闭（Win11 行为）
         if ctx.input(|i| i.smooth_scroll_delta.y.abs() > 0.0) {
-            if std::env::var("MJ_MENU_LOG").is_ok() {
-                crate::app::dbg_log("[MENU] close wheel");
-            }
             self.content_menu = None;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if std::env::var("MJ_MENU_LOG").is_ok() {
-                crate::app::dbg_log("[MENU] close esc");
-            }
             self.content_menu = None;
         }
         if let Some(a) = action {
@@ -696,14 +695,19 @@ impl App {
 
     /// 标签右键菜单：关闭 / 关闭其他 / 关闭右侧
     pub(crate) fn ui_tab_menu(&mut self, ctx: &egui::Context, now: f64) {
-        let Some((idx, pos)) = self.tab_menu else { return };
+        let Some((idx, pos)) = self.tab_menu else {
+            self.tab_menu_rect = None;
+            self.tab_menu_fresh = false;
+            return;
+        };
         let pal = self.pal.clone();
         let mut action: Option<u8> = None;
+        let mut frame_rect: Option<egui::Rect> = None;
         egui::Area::new(egui::Id::new("tab-menu"))
             .fixed_pos(pos)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                widgets::menu_frame(&pal).show(ui, |ui| {
+                let fr = widgets::menu_frame(&pal).show(ui, |ui| {
                     ui.set_width(170.0);
                     if widgets::menu_item(ui, &pal, Icon::Close, "关闭  Ctrl+W", false).clicked() {
                         action = Some(1);
@@ -715,10 +719,19 @@ impl App {
                         action = Some(3);
                     }
                 });
+                frame_rect = Some(fr.response.rect);
             });
-        if ctx.input(|i| i.pointer.any_click()) && !ctx.is_pointer_over_egui() {
+        self.tab_menu_rect = frame_rect;
+        // 点外关闭：rect 判定 + fresh 跳过打开当帧 + 2pt 容差（同 ui_content_menu）
+        let pointer = ctx.input(|i| i.pointer.interact_pos());
+        let inside = match (self.tab_menu_rect, pointer) {
+            (Some(r), Some(p)) => r.expand(2.0).contains(p),
+            _ => false,
+        };
+        if ctx.input(|i| i.pointer.any_click()) && !inside && !self.tab_menu_fresh {
             self.tab_menu = None;
         }
+        self.tab_menu_fresh = false;
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.tab_menu = None;
         }
@@ -833,15 +846,20 @@ impl App {
 
     fn ui_ctx_menu(&mut self, ctx: &egui::Context, now: f64) {
         let pal = self.pal.clone();
-        let Some(menu) = self.menu.take() else { return };
+        let Some(menu) = self.menu.take() else {
+            self.ctx_menu_rect = None;
+            self.ctx_menu_fresh = false;
+            return;
+        };
         let mut keep = true;
         let mut action: Option<&'static str> = None;
+        let mut frame_rect: Option<egui::Rect> = None;
 
         egui::Area::new(Id::unique("ctx-menu"))
             .order(egui::Order::Tooltip)
             .fixed_pos(menu.pos)
             .show(ctx, |ui| {
-                widgets::menu_frame(&pal).show(ui, |ui| {
+                let fr = widgets::menu_frame(&pal).show(ui, |ui| {
                     ui.set_width(190.0);
                     let target = menu.target.clone();
                     if let Some(p) = &target {
@@ -887,14 +905,24 @@ impl App {
                         }
                     }
                 });
+                frame_rect = Some(fr.response.rect);
             });
+        self.ctx_menu_rect = frame_rect;
 
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             keep = false;
         }
-        if ctx.input(|i| i.pointer.any_click()) && !ctx.is_pointer_over_egui() {
+        // 点外关闭：rect 判定（is_pointer_over_egui 整窗恒真，曾导致永远关不掉），
+        // fresh 跳过打开当帧，expand 2pt 吸收渲染取整偏移
+        let pointer = ctx.input(|i| i.pointer.interact_pos());
+        let inside = match (self.ctx_menu_rect, pointer) {
+            (Some(r), Some(p)) => r.expand(2.0).contains(p),
+            _ => false,
+        };
+        if ctx.input(|i| i.pointer.any_click()) && !inside && !self.ctx_menu_fresh {
             keep = false;
         }
+        self.ctx_menu_fresh = false;
 
         if let (Some(act), Some(target)) = (action, menu.target.clone()) {
             keep = false;

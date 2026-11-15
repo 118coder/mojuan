@@ -249,6 +249,21 @@ pub struct App {
     /// 不能用 is_pointer_over_egui：墨卷整个窗口都是 egui，它恒为真，
     /// 曾导致菜单永远点不掉）
     pub content_menu_rect: Option<Rect>,
+    /// 菜单「刚打开」标志：打开当帧的 any_click 就是打开菜单的那次点击，
+    /// 语义上不属于关闭手势，必须跳过「点外关闭」判定。
+    /// 没有它：egui 渲染 Area 时把位置取整到物理像素，指针坐标不取整，
+    /// 松开在 x.5/y.5+ 这类小数位置时菜单 rect 边界落在指针外侧零点几 pt，
+    /// 「打开的那次点击」被误判成「菜单外点击」→ 菜单当帧开、当帧关
+    /// （用户表现：右键呼不出；真实鼠标坐标几乎必然带小数）
+    pub content_menu_fresh: bool,
+    /// 文件树右键菜单的屏幕矩形 + 刚打开标志（关闭判定同 content_menu）
+    pub ctx_menu_rect: Option<Rect>,
+    pub ctx_menu_fresh: bool,
+    /// 标签右键菜单的屏幕矩形 + 刚打开标志（关闭判定同 content_menu）
+    pub tab_menu_rect: Option<Rect>,
+    pub tab_menu_fresh: bool,
+    /// 右键按下位置（egui 松开时即清 press_origin，按住超时长需要自判）
+    pub rclick_press_pos: Option<Pos2>,
     /// 无边框标题栏：系统模态拖拽已启动（防重复触发 StartDrag）
     pub titlebar_drag: bool,
     /// 无边框窗口 chrome 状态（主题 + 全屏），变化时才重设 DWM 圆角/描边
@@ -324,6 +339,12 @@ impl App {
             find: None,
             content_menu: None,
             content_menu_rect: None,
+            content_menu_fresh: false,
+            ctx_menu_rect: None,
+            ctx_menu_fresh: false,
+            tab_menu_rect: None,
+            tab_menu_fresh: false,
+            rclick_press_pos: None,
             titlebar_drag: false,
             chrome_state: None,
         };
@@ -567,35 +588,44 @@ impl App {
         if self.viewer.is_some() {
             return;
         }
-        let sec = ctx.input(|i| i.pointer.secondary_clicked());
-        let menu_dbg = std::env::var("MJ_MENU_LOG").is_ok();
-        if menu_dbg && sec {
-            crate::app::dbg_log(&format!(
-                "[MENU] sec_clicked pos={:?} central={:?}",
-                ctx.input(|i| i.pointer.interact_pos()),
-                central
-            ));
+        // egui 0.37 的 click 判定带 max_click_duration=0.8s：按住右键超过 0.8s
+        // 松开不算点击 → 菜单呼不出（真实用户犹豫按久很常见，且与 Windows
+        // 原生行为不符）。上下文菜单只关心「原地按下-松开」：
+        // 按下帧记录位置，松开帧比对距离 ≤ 6pt（与 egui 同阈值）即成立，
+        // 不限制按住时长。（egui 的 press_origin 在松开帧已被清空，只能自记）
+        let (pressed, released, cur) = ctx.input(|i| {
+            (
+                i.pointer.secondary_pressed(),
+                i.pointer.secondary_released(),
+                i.pointer.interact_pos(),
+            )
+        });
+        if pressed {
+            self.rclick_press_pos = cur;
+        }
+        let sec = ctx.input(|i| i.pointer.secondary_clicked())
+            || (released
+                && self
+                    .rclick_press_pos
+                    .zip(cur)
+                    .is_some_and(|(p0, p1)| p0.distance(p1) <= 6.0));
+        if released {
+            self.rclick_press_pos = None;
         }
         if !sec {
             return;
         }
-        let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) else {
+        let Some(pos) = cur else {
             return;
         };
         if !central.contains(pos) {
-            if menu_dbg { crate::app::dbg_log(&format!("[MENU] REJECT outside-central pos={pos:?}")); }
             return;
         }
-        // 顶部标签条区域不触发
-        if pos.y < central.min.y + 44.0 {
-            if menu_dbg { crate::app::dbg_log(&format!("[MENU] REJECT tab-strip pos={pos:?}")); }
+        // 顶部标签条区域不触发（完整模式才有标签条 44pt；极简模式顶部无标签条，
+        // 多禁一块会让内容区顶部的右键失灵）
+        let tab_strip_h = if self.minimal { 0.0 } else { 44.0 };
+        if pos.y < central.min.y + tab_strip_h {
             return;
-        }
-        if menu_dbg {
-            crate::app::dbg_log(&format!(
-                "[MENU] OPEN editor={} pos={pos:?}",
-                matches!(self.store.settings.mode, ViewMode::Edit)
-            ));
         }
         let is_editor = match self.store.settings.mode {
             ViewMode::Edit => true,
@@ -606,6 +636,7 @@ impl App {
             }
         };
         self.content_menu = Some((is_editor, pos));
+        self.content_menu_fresh = true;
     }
 
     /// 无边框窗口：窗口边缘热区 → 系统模态缩放（BeginResize）。
@@ -1013,7 +1044,6 @@ impl App {
                     if self.minimal {
                         self.minimal = false;
                     }
-                    self.tab_menu = None;
                     self.tab_menu = None;
                     self.viewer = None;
                     self.find = None;
@@ -1830,20 +1860,6 @@ impl App {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         self.now = now;
-        if std::env::var("MJ_EV_LOG").is_ok() {
-            let evs: Vec<String> = ctx.input(|i| {
-                i.raw
-                    .events
-                    .iter()
-                    .take(8)
-                    .map(|e| format!("{e:?}"))
-                    .collect()
-            });
-            if !evs.is_empty() {
-                crate::app::dbg_log(&format!("[EV] {}", evs.join(" | ")));
-            }
-        }
-
         self.handle_shortcuts(&ctx, now);
         self.handle_drops(ui.ctx(), now);
         self.handle_wheel_zoom(ui.ctx());
@@ -1907,9 +1923,9 @@ impl App {
             self.maybe_open_content_menu(&ctx, central.response.rect, now);
             self.ui_overlays(&ctx, now);
             self.draw_drag_overlay(&ctx, now);
-            if self.content_menu.is_some() {
-                self.ui_content_menu(&ctx, now);
-            }
+            // 无条件调用：菜单关闭时函数内部清 rect/fresh 状态（曾因 is_some()
+            // 门住导致 rect 残留旧值，close 判定读到脏数据）
+            self.ui_content_menu(&ctx, now);
             return;
         }
 
@@ -1967,22 +1983,9 @@ impl App {
         self.ui_overlays(&ctx, now);
         self.draw_drag_overlay(&ctx, now);
         // 完整界面分支也要渲染右键菜单（曾经漏掉：状态置位了但没人画，
-        // 表现为完整模式下右键没有任何反应；极简分支一直有渲染调用）
-        if self.content_menu.is_some() {
-            self.ui_content_menu(&ctx, now);
-        }
-    }
-}
-
-/// 调试日志（临时埋点，[MENU]/[EV] 标签）：GUI 子系统下 eprintln 落不到
-/// 重定向句柄，写文件最可靠（MJ_LOG_FILE=路径）
-pub(crate) fn dbg_log(msg: &str) {
-    eprintln!("{msg}");
-    if let Ok(path) = std::env::var("MJ_LOG_FILE") {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(f, "{msg}");
-        }
+        // 表现为完整模式下右键没有任何反应；极简分支一直有渲染调用）。
+        // 无条件调用：关闭态在函数内部清理 rect/fresh。
+        self.ui_content_menu(&ctx, now);
     }
 }
 

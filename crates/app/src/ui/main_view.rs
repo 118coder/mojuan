@@ -560,6 +560,8 @@ impl App {
                         } else if resp.secondary_clicked() {
                             if let Some(pos) = resp.interact_pointer_pos() {
                                 self.tab_menu = Some((i, pos));
+                                // 打开当帧的右键点击不能被当成「点外关闭」（同 content_menu_fresh）
+                                self.tab_menu_fresh = true;
                             }
                         } else if resp.clicked() {
                             activate = Some(i);

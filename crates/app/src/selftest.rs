@@ -13,7 +13,7 @@
 use crate::app::App;
 use egui::{
     Context, Event, Id, Key, Modifiers, MouseWheelSource, MouseWheelUnit, PointerButton, Pos2,
-    Rect, RawInput, TouchPhase, ViewportCommand, ViewportId, ViewportInfo, Vec2,
+    Rect, RawInput, TouchPhase, ViewportId, ViewportInfo, Vec2,
 };
 use mojuan_core::ViewMode;
 
@@ -135,7 +135,7 @@ pub fn run_full_selftest() -> i32 {
             .collect()
     };
 
-    for f in 0..60i32 {
+    for f in 0..150i32 {
         let events = match f {
             // egui 级右键注入（模拟 winit 上交的事件）：按下 → 释放
             16 => vec![pointer(PointerButton::Secondary, true, CLICK)],
@@ -160,13 +160,67 @@ pub fn run_full_selftest() -> i32 {
             39 => vec![pointer(PointerButton::Primary, false, BAR)],
             40 => vec![pointer(PointerButton::Primary, true, BAR)],
             41 => vec![pointer(PointerButton::Primary, false, BAR)],
-            // 极简模式：右键 + Esc
-            46 => vec![pointer(PointerButton::Secondary, true, CLICK)],
-            47 => vec![pointer(PointerButton::Secondary, false, CLICK)],
-            48 => vec![esc(true)],
-            49 => vec![esc(false)],
+            // 极简模式（真实切 minimal=true）：顶部带右键（44pt 误伤修复）→ 点外关 → 常规右键
+            50 => vec![pointer(PointerButton::Secondary, true, Pos2::new(500.0, 50.0))],
+            51 => vec![pointer(PointerButton::Secondary, false, Pos2::new(500.0, 50.0))],
+            53 => vec![pointer(PointerButton::Primary, true, OUTSIDE)],
+            54 => vec![
+                pointer(PointerButton::Primary, false, OUTSIDE),
+                pointer(PointerButton::Secondary, true, CLICK),
+            ],
+            55 => vec![pointer(PointerButton::Secondary, false, CLICK)],
+            58 => vec![esc(true)],
+            59 => vec![esc(false)],
+            // ---- 以下为「真实事件流」场景：模拟真鼠标的悬停/微动/点菜单项 ----
+            // 悬停后再右键（真实用户必然先移动指针过去）
+            64 => vec![move_to(CLICK)],
+            66 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            67 => vec![pointer(PointerButton::Secondary, false, CLICK)],
+            // 点菜单项（菜单固定在 CLICK=500,400 起，宽 200；550,430 落在菜单内条目上）
+            70 => vec![pointer(PointerButton::Primary, true, Pos2::new(550.0, 430.0))],
+            71 => vec![pointer(PointerButton::Primary, false, Pos2::new(550.0, 430.0))],
+            // 悬停 + 右键 + 按住期间微动 1.9pt（< 6pt 阈值）→ 松开
+            76 => vec![move_to(CLICK)],
+            77 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            78 => vec![move_to(Pos2::new(501.5, 401.2))],
+            79 => vec![pointer(PointerButton::Secondary, false, Pos2::new(501.5, 401.2))],
+            // 点外关闭后，悬停 + 快速连续两记右键（第二记会算双击，仍应呼出）
+            82 => vec![pointer(PointerButton::Primary, true, OUTSIDE)],
+            83 => vec![pointer(PointerButton::Primary, false, OUTSIDE)],
+            86 => vec![move_to(CLICK)],
+            87 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            88 => vec![pointer(PointerButton::Secondary, false, CLICK)],
+            91 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            92 => vec![pointer(PointerButton::Secondary, false, CLICK)],
+            // Esc 关掉连续右键留下的菜单
+            95 => vec![esc(true)],
+            96 => vec![esc(false)],
+            // 按住 > 0.8s 松开（egui 0.37 max_click_duration；帧距 DT=1/30s，26 帧 ≈ 0.87s）
+            100 => vec![move_to(CLICK)],
+            101 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            127 => vec![pointer(PointerButton::Secondary, false, CLICK)],
+            // 菜单开着时右键菜单外（移位语义），再右键原位（再呼出）
+            130 => vec![pointer(PointerButton::Secondary, true, Pos2::new(760.0, 450.0))],
+            131 => vec![pointer(PointerButton::Secondary, false, Pos2::new(760.0, 450.0))],
+            134 => vec![pointer(PointerButton::Secondary, true, CLICK)],
+            135 => vec![pointer(PointerButton::Secondary, false, CLICK)],
+            // y 方向取整进位变体：松开在 y=401.6（取整进位到 402.0），
+            // 菜单 rect 上边界曾落在指针下方 0.4pt → 开即关（与 x=501.5 同根因）
+            140 => vec![move_to(Pos2::new(500.0, 400.0))],
+            142 => vec![pointer(PointerButton::Secondary, true, Pos2::new(500.0, 400.0))],
+            143 => vec![pointer(PointerButton::Secondary, false, Pos2::new(500.0, 401.6))],
+            // 收尾：Esc 关闭，保证结束态干净
+            147 => vec![esc(true)],
+            148 => vec![esc(false)],
             _ => Vec::new(),
         };
+        // 极简模式场景真实进入 minimal 分支（此前标注「极简」但从未设 minimal=true）
+        if f == 50 {
+            app.minimal = true;
+        }
+        if f == 61 {
+            app.minimal = false;
+        }
         let cmds = frame(&mut app, events, t);
         t += DT;
 
@@ -245,12 +299,22 @@ pub fn run_full_selftest() -> i32 {
                     &format!("cmds={cmds:?}"),
                 );
             }
-            47 => {
+            52 => {
                 let opened = app.content_menu.is_some();
                 let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
                 check(
                     &mut failures,
-                    "极简模式·右键打开",
+                    "极简模式·顶部带(y=50)右键打开（44pt 误伤修复）",
+                    opened && rendered,
+                    &format!("open={opened} render={rendered}"),
+                );
+            }
+            55 => {
+                let opened = app.content_menu.is_some();
+                let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
+                check(
+                    &mut failures,
+                    "极简模式·右键打开（真实 minimal=true）",
                     opened,
                     &format!("content_menu.is_some()={opened}"),
                 );
@@ -259,6 +323,99 @@ pub fn run_full_selftest() -> i32 {
                     "极简模式·菜单真实渲染",
                     rendered,
                     &format!("read_response(marker)={rendered}"),
+                );
+            }
+            // ---- 真实事件流场景断言 ----
+            68 => {
+                let opened = app.content_menu.is_some();
+                let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
+                check(
+                    &mut failures,
+                    "真流·悬停后右键打开",
+                    opened && rendered,
+                    &format!("open={opened} render={rendered}"),
+                );
+            }
+            73 => check(
+                &mut failures,
+                "真流·点菜单项后关闭",
+                app.content_menu.is_none(),
+                &format!("content_menu.is_some()={}", app.content_menu.is_some()),
+            ),
+            80 => {
+                let opened = app.content_menu.is_some();
+                let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
+                check(
+                    &mut failures,
+                    "真流·按住微动后右键打开",
+                    opened && rendered,
+                    &format!("open={opened} render={rendered}（微动 1.9pt < 6pt）"),
+                );
+            }
+            84 => check(
+                &mut failures,
+                "真流·点外关闭",
+                app.content_menu.is_none(),
+                &format!("content_menu.is_some()={}", app.content_menu.is_some()),
+            ),
+            89 => check(
+                &mut failures,
+                "真流·连续右键第一记打开",
+                app.content_menu.is_some(),
+                &format!("content_menu.is_some()={}", app.content_menu.is_some()),
+            ),
+            93 => {
+                let opened = app.content_menu.is_some();
+                let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
+                check(
+                    &mut failures,
+                    "真流·连续右键第二记（双击计数）仍打开",
+                    opened && rendered,
+                    &format!("open={opened} render={rendered}"),
+                );
+            }
+            97 => check(
+                &mut failures,
+                "真流·Esc 关闭",
+                app.content_menu.is_none(),
+                &format!("content_menu.is_some()={}", app.content_menu.is_some()),
+            ),
+            128 => {
+                // egui 0.37 按住 >0.8s 松开不算点击（max_click_duration）。
+                // 上下文菜单改为自判「原地按下-松开」，按住 0.87s 也必须呼出。
+                let opened = app.content_menu.is_some();
+                let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
+                check(
+                    &mut failures,
+                    "真流·按住 0.87s 松开仍打开（绕开 egui 0.8s 时长限制）",
+                    opened && rendered,
+                    &format!("open={opened} render={rendered}"),
+                );
+            }
+            132 => check(
+                &mut failures,
+                "真流·菜单开着右键别处=移位（仍在）",
+                app.content_menu.is_some(),
+                &format!("content_menu.is_some()={}", app.content_menu.is_some()),
+            ),
+            136 => {
+                let opened = app.content_menu.is_some();
+                let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
+                check(
+                    &mut failures,
+                    "真流·移位后原位再呼出",
+                    opened && rendered,
+                    &format!("open={opened} render={rendered}"),
+                );
+            }
+            144 => {
+                let opened = app.content_menu.is_some();
+                let rendered = ctx.read_response(Id::unique(MENU_MARKER)).is_some();
+                check(
+                    &mut failures,
+                    "真流·松开位置 y=401.6（取整进位）仍打开",
+                    opened && rendered,
+                    &format!("open={opened} render={rendered}（历史 bug：开即关）"),
                 );
             }
             _ => {}

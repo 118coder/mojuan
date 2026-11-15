@@ -177,6 +177,8 @@ impl App {
                     target: Some(p),
                     is_dir,
                 });
+                // 打开当帧的右键点击不能被当成「点外关闭」（见 content_menu_fresh 注释）
+                self.ctx_menu_fresh = true;
             }
             None => {}
         }
