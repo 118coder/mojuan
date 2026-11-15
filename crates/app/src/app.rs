@@ -527,7 +527,7 @@ impl App {
 
     /// 中央区域右键 → 打开内容菜单（阅读/编辑按模式与位置判定）
     fn maybe_open_content_menu(&mut self, ctx: &Context, central: Rect, now: f64) {
-        if self.viewer.is_some() || self.content_menu.is_some() {
+        if self.viewer.is_some() {
             return;
         }
         let (sec, pos) = ctx.input(|i| (i.pointer.secondary_clicked(), i.pointer.interact_pos()));
